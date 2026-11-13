@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/ParticipantTimedOut.v1.schema.json",
+  "title": "ParticipantTimedOut v1",
+  "description": "Fact: media-relay received no packets from a participant for PARTICIPANT_TIMEOUT_MS (client crashed or lost network). call-signaling removes the participant like a normal leave. Channel: SQS relay-results (media-relay -> call-signaling).",
+  "allOf": [
+    {
+      "$ref": "../envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "type": {
+      "const": "ParticipantTimedOut"
+    },
+    "version": {
+      "const": 1
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "callId",
+        "userId"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "userId": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
