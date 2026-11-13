@@ -191,7 +191,7 @@ func (s *store) markDead(ctx context.Context, n node) error {
 		TableName:                 &s.cfg.NodesTable,
 		Key:                       key(n.ID),
 		UpdateExpression:          aws.String("SET #st = :dead"),
-		ConditionExpression:       aws.String("#st = :alive AND beat = :seen"),
+		ConditionExpression:       aws.String("#st = :alive AND (beat = :seen OR attribute_not_exists(beat))"),
 		ExpressionAttributeNames:  map[string]string{"#st": "status"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{":dead": str(nodeDead), ":alive": str(nodeAlive), ":seen": num(n.Beat)},
 	})
