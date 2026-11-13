@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,7 +13,8 @@ import (
 )
 
 // Relay pod failover:
-//  1. every pod pings (writes its own row in relay-nodes) every second;
+//  1. every pod pings every second: it increments a heartbeat counter in its own
+//     row of relay-nodes (a logical clock: no wall-clock time is ever compared);
 //  2. the surviving pods act as coordinator: a pod silent for 3s is marked DEAD
 //     by exactly one of them (conditional write);
 //  3. the calls of DEAD pods are adopted by surviving pods, and RelayMoved makes
@@ -28,28 +30,39 @@ const (
 )
 
 type node struct {
-	ID       string `dynamodbav:"pk"`
-	LastPing int64  `dynamodbav:"lastPing"` // unix ms
-	Status   string `dynamodbav:"status"`
+	ID     string `dynamodbav:"pk"`
+	Beat   int64  `dynamodbav:"beat"` // heartbeat counter: +1 per ping
+	Status string `dynamodbav:"status"`
+	Addr   string `dynamodbav:"addr"` // host:port of the pod's /health, for the second opinion
+}
+
+// pingSeen is when this coordinator last saw a pod's counter change, measured on
+// OUR clock, so clock differences between pods never make a pod look dead.
+type pingSeen struct {
+	beat int64
+	at   time.Time
 }
 
 func (r *relay) failover(ctx context.Context) {
 	r.unhealthyAt.Store(time.Now().UnixNano())
 	r.adoptSessions(ctx, []string{r.id}) // restarted pod: take our own calls back
 	go func() {
-		for ctx.Err() == nil {
-			start := time.Now()
-			r.checkLink(start, r.st.ping(ctx, r.id, start.UnixMilli()))
+		for beat := int64(1); ctx.Err() == nil; beat++ {
+			if !r.pingsPaused.Load() {
+				start := time.Now()
+				r.checkLink(start, r.st.ping(ctx, r.id, r.probeAddr, beat))
+			}
 			time.Sleep(pingEvery)
 		}
 	}()
+	seen := map[string]pingSeen{}
 	for ctx.Err() == nil {
 		time.Sleep(watchEvery)
-		r.watchNodes(ctx)
+		r.watchNodes(ctx, seen)
 	}
 }
 
-func (r *relay) watchNodes(ctx context.Context) {
+func (r *relay) watchNodes(ctx context.Context, seen map[string]pingSeen) {
 	// After an outage every pod looks silent: give live pods time to ping first.
 	if time.Since(time.Unix(0, r.unhealthyAt.Load())) < deadAfter {
 		return
@@ -59,14 +72,22 @@ func (r *relay) watchNodes(ctx context.Context) {
 	if !r.checkLink(start, err) {
 		return
 	}
-	stale := time.Now().Add(-deadAfter).UnixMilli()
 	var dead []string
 	for _, n := range nodes {
+		if s, ok := seen[n.ID]; !ok || s.beat != n.Beat {
+			seen[n.ID] = pingSeen{n.Beat, time.Now()} // counter moved since last look: alive
+			continue
+		}
 		switch {
 		case n.ID == r.id:
-		case n.Status == nodeAlive && n.LastPing < stale:
+		case n.Status == nodeAlive && time.Since(seen[n.ID].at) > deadAfter:
+			if answersHealth(n.Addr) { // second opinion: pings stopped but the pod is serving
+				r.log.Warn("relay pod missed pings but answers health checks: no failover", "pod", n.ID)
+				seen[n.ID] = pingSeen{n.Beat, time.Now()} // ask again after another deadAfter
+				continue
+			}
 			if r.st.markDead(ctx, n) == nil {
-				r.log.Warn("relay pod dead: no ping", "pod", n.ID, "silentMs", time.Now().UnixMilli()-n.LastPing)
+				r.log.Warn("relay pod dead: no ping, no health answer", "pod", n.ID, "silentMs", time.Since(seen[n.ID].at).Milliseconds())
 				dead = append(dead, n.ID)
 			}
 		case n.Status == nodeDead:
@@ -76,6 +97,21 @@ func (r *relay) watchNodes(ctx context.Context) {
 	if len(dead) > 0 {
 		r.adoptSessions(ctx, dead)
 	}
+}
+
+var probe = &http.Client{Timeout: 500 * time.Millisecond}
+
+// answersHealth calls the suspect pod directly. A dead or frozen pod does not answer.
+func answersHealth(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	resp, err := probe.Get("http://" + addr + "/health")
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // checkLink records an unhealthy link when a DynamoDB call failed OR was slow.
@@ -132,10 +168,10 @@ func (r *relay) adoptSessions(ctx context.Context, owners []string) {
 
 // --- relay-nodes and session ownership in DynamoDB ---
 
-func (s *store) ping(ctx context.Context, id string, now int64) error {
+func (s *store) ping(ctx context.Context, id, addr string, beat int64) error {
 	_, err := s.db.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: &s.cfg.NodesTable,
-		Item:      map[string]types.AttributeValue{"pk": str(id), "lastPing": num(now), "status": str(nodeAlive)},
+		Item:      map[string]types.AttributeValue{"pk": str(id), "beat": num(beat), "status": str(nodeAlive), "addr": str(addr)},
 	})
 	return err
 }
@@ -149,15 +185,15 @@ func (s *store) nodes(ctx context.Context) ([]node, error) {
 	return ns, attributevalue.UnmarshalListOfMaps(out.Items, &ns)
 }
 
-// markDead succeeds for exactly one coordinator: the ping must still be the stale one we saw.
+// markDead succeeds for exactly one coordinator: the counter must still be the one we saw.
 func (s *store) markDead(ctx context.Context, n node) error {
 	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 &s.cfg.NodesTable,
 		Key:                       key(n.ID),
 		UpdateExpression:          aws.String("SET #st = :dead"),
-		ConditionExpression:       aws.String("#st = :alive AND lastPing = :seen"),
+		ConditionExpression:       aws.String("#st = :alive AND beat = :seen"),
 		ExpressionAttributeNames:  map[string]string{"#st": "status"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":dead": str(nodeDead), ":alive": str(nodeAlive), ":seen": num(n.LastPing)},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":dead": str(nodeDead), ":alive": str(nodeAlive), ":seen": num(n.Beat)},
 	})
 	return err
 }

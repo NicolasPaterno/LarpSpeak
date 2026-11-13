@@ -51,6 +51,8 @@ type relay struct {
 	live map[string]*liveSession // by callId
 
 	unhealthyAt atomic.Int64 // unix ns of the last failed ping/scan; adoption waits for a stable link
+	probeAddr   string       // this pod's /health address inside the network (container IP:port)
+	pingsPaused atomic.Bool  // fault injection (SIGUSR1): simulate losing the link to DynamoDB
 }
 
 type callRef struct {

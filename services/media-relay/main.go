@@ -47,7 +47,18 @@ func main() {
 	}
 	st := &store{db: dynamodb.NewFromConfig(awsCfg), cfg: cfg}
 	b := &bus{sqs: sqs.NewFromConfig(awsCfg), log: log, urls: map[string]string{}}
-	r := &relay{st: st, log: log, cfg: cfg, id: hostname, host: advertisedHost(hostname), live: map[string]*liveSession{}}
+	r := &relay{st: st, log: log, cfg: cfg, id: hostname, host: advertisedHost(hostname), live: map[string]*liveSession{},
+		probeAddr: net.JoinHostPort(containerIP(hostname), cfg.Port)}
+	// Fault injection for demos: `docker kill -s USR1 <pod>` pauses/resumes this pod's
+	// pings, as if it lost its link to DynamoDB while still forwarding audio.
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		for range usr1 {
+			r.pingsPaused.Store(!r.pingsPaused.Load())
+			log.Warn("fault injection: pings toggled", "paused", r.pingsPaused.Load())
+		}
+	}()
 
 	go relayOutbox(ctx, st, b)
 	go b.consume(ctx, cfg.RelayRequests, r.onRelayRequest) // competing consumers across replicas (R4)
@@ -76,6 +87,10 @@ func advertisedHost(hostname string) string {
 	if h := os.Getenv("RELAY_HOST"); h != "" {
 		return h
 	}
+	return containerIP(hostname)
+}
+
+func containerIP(hostname string) string {
 	if ips, err := net.LookupHost(hostname); err == nil && len(ips) > 0 {
 		return ips[0]
 	}
