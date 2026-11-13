@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,8 +11,9 @@ import (
 // hub pushes notifications ("you're being called", call active/failed) to
 // connected users over Server-Sent Events. In-memory: one call-signaling instance.
 type hub struct {
-	mu   sync.Mutex
-	subs map[string]map[chan []byte]struct{}
+	mu     sync.Mutex
+	subs   map[string]map[chan []byte]struct{}
+	replay func(ctx context.Context, userID string) // resends what a newly connected user missed
 }
 
 func newHub() *hub { return &hub{subs: map[string]map[chan []byte]struct{}{}} }
@@ -44,6 +46,9 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	h.subs[userID][ch] = struct{}{}
 	h.mu.Unlock()
+	if h.replay != nil {
+		go h.replay(r.Context(), userID)
+	}
 	defer func() {
 		h.mu.Lock()
 		delete(h.subs[userID], ch)

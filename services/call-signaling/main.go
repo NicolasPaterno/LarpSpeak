@@ -44,6 +44,7 @@ func main() {
 	b := &bus{sqs: sqs.NewFromConfig(awsCfg), sns: sns.NewFromConfig(awsCfg), log: log, urls: map[string]string{}}
 	h := newHub()
 	sg := &saga{st: st, hub: h, log: log, cfg: cfg, nowFn: time.Now}
+	h.replay = sg.replayInvites
 
 	go relayOutbox(ctx, st, b, cfg.TopicArn)
 	go b.consume(ctx, cfg.RelayResults, sg.onRelayResult)

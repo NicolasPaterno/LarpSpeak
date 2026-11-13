@@ -91,6 +91,21 @@ func (s *store) pendingCalls(ctx context.Context) ([]call, error) {
 	return calls, attributevalue.UnmarshalListOfMaps(out.Items, &calls)
 }
 
+// activeInvites lists active calls that invited the user. A scan is fine at demo scale.
+func (s *store) activeInvites(ctx context.Context, user string) ([]call, error) {
+	out, err := s.db.Scan(ctx, &dynamodb.ScanInput{
+		TableName:                 &s.cfg.CallsTable,
+		FilterExpression:          aws.String("#s = :a AND contains(invited, :u)"),
+		ExpressionAttributeNames:  map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":a": str(statusActive), ":u": str(user)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var calls []call
+	return calls, attributevalue.UnmarshalListOfMaps(out.Items, &calls)
+}
+
 // --- transaction items ---
 
 // join is the R2 concurrency control: one atomic conditional update takes a seat

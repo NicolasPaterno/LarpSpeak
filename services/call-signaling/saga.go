@@ -267,6 +267,21 @@ func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.
 	return nil
 }
 
+// replayInvites resends invitations the user missed while not connected:
+// active calls that invited them and that they have not joined yet.
+func (sg *saga) replayInvites(ctx context.Context, user string) {
+	calls, err := sg.st.activeInvites(ctx, user)
+	if err != nil {
+		sg.log.Warn("invite replay failed", "userId", user, "err", err)
+		return
+	}
+	for i := range calls {
+		if !calls[i].has(user) {
+			sg.hub.notify(user, "incoming_call", map[string]any{"callId": calls[i].ID, "from": calls[i].CallerID})
+		}
+	}
+}
+
 // broadcast tells everyone still in the call that user joined or left.
 func (sg *saga) broadcast(c *call, user, event string) {
 	for _, u := range c.Participants {
