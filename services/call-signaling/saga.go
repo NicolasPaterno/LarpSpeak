@@ -59,7 +59,7 @@ func (sg *saga) start(ctx context.Context, c call) error {
 	return err
 }
 
-// onRelayResult handles RelayAllocated / RelayFailed from media-relay.
+// onRelayResult handles RelayAllocated / RelayFailed / RelayClosed from media-relay.
 func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	var r relayResult
 	if err := json.Unmarshal(e.Payload, &r); err != nil || r.CallID == "" {
@@ -77,6 +77,14 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	switch {
 	case e.Type == "RelayFailed" && c.Status == statusPending:
 		return sg.compensate(ctx, c, "relay failed: "+r.Reason, dedupe)
+
+	case e.Type == "RelayClosed" && c.Status == statusActive:
+		// media-relay saw no audio for too long: end the abandoned call.
+		if err := sg.end(ctx, c, "relay "+r.Reason, dedupe); err != nil {
+			return err
+		}
+		sg.hub.notify(c.CallerID, "call_ended", map[string]string{"callId": c.ID, "reason": "relay " + r.Reason})
+		return nil
 
 	case e.Type == "RelayAllocated" && c.Status == statusPending:
 		now := sg.nowFn().UnixMilli()
@@ -117,7 +125,7 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 		sg.log.Warn("late relay released", "correlationId", c.ID, "status", c.Status, "relayId", r.RelayID)
 		return sg.commitOnce(ctx, dedupe, out)
 
-	default: // RelayFailed for a call that is no longer pending: nothing to undo.
+	default: // RelayFailed/RelayClosed for a call already past that state: nothing to do.
 		return sg.commitOnce(ctx, dedupe)
 	}
 }
@@ -151,11 +159,12 @@ func (sg *saga) compensate(ctx context.Context, c *call, reason string, extra ..
 	return nil
 }
 
-// end hangs up an active call and publishes CallEnded (consumed by media-relay and audit-vault).
-func (sg *saga) end(ctx context.Context, c *call) error {
+// end finishes an active call (hang-up or idle relay) and publishes CallEnded,
+// consumed by media-relay and audit-vault. extra items (the dedupe marker) go first.
+func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.TransactWriteItem) error {
 	now := sg.nowFn().UnixMilli()
 	ended, err := newEnvelope("CallEnded", c.ID, map[string]any{
-		"callId": c.ID, "relayId": c.RelayID, "durationMs": now - c.StartedAt, "reason": "hangup",
+		"callId": c.ID, "relayId": c.RelayID, "durationMs": now - c.StartedAt, "reason": reason,
 	})
 	if err != nil {
 		return err
@@ -164,13 +173,21 @@ func (sg *saga) end(ctx context.Context, c *call) error {
 	if err != nil {
 		return err
 	}
-	codes, err := sg.st.commit(ctx,
-		sg.st.transition(c.ID, statusActive, statusEnded, map[string]types.AttributeValue{"endedAt": num(now)}),
+	items := append(extra,
+		sg.st.transition(c.ID, statusActive, statusEnded, map[string]types.AttributeValue{"endedAt": num(now), "reason": str(reason)}),
 		sg.st.releaseSeats(c.RoomID, c.Seats), out)
-	if conditionFailed(codes, 0) {
+	codes, err := sg.st.commit(ctx, items...)
+	if len(extra) > 0 && conditionFailed(codes, 0) {
+		return errDuplicate
+	}
+	if conditionFailed(codes, len(extra)) {
 		return errStateChanged
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	sg.log.Info("call ended", "correlationId", c.ID, "reason", reason)
+	return nil
 }
 
 // sweepTimeouts compensates calls that waited longer than RELAY_TIMEOUT_MS.

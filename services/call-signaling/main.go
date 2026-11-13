@@ -133,11 +133,10 @@ func (sg *saga) handleEnd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is " + c.Status})
 		return
 	}
-	if err := sg.end(r.Context(), c); err != nil {
+	if err := sg.end(r.Context(), c, "hangup"); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "call state changed, retry"})
 		return
 	}
-	sg.log.Info("call ended", "correlationId", c.ID)
 	writeJSON(w, http.StatusAccepted, map[string]string{"callId": c.ID, "status": statusEnded})
 }
 
