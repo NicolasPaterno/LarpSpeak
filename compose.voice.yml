@@ -1,5 +1,6 @@
 # Real voice calls from outside Docker (voice-client on this or other machines on the same network).
-# One media-relay with its UDP port published, announcing this machine's LAN IP:
+# Two media-relay instances, each with its own published UDP port, both announcing this
+# machine's LAN IP, so a call survives one relay dying (failover moves it to the other):
 #   RELAY_HOST=192.168.x.y docker compose -f docker-compose.yml -f compose.voice.yml up -d --build
 services:
   media-relay:
@@ -8,3 +9,17 @@ services:
     ports: ["40000:40000/udp"]
     environment:
       RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to this machine's LAN IP}
+
+  media-relay-b:
+    extends:
+      file: docker-compose.yml
+      service: media-relay
+    deploy:
+      replicas: 1
+    ports: ["40001:40001/udp"]
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to this machine's LAN IP}
+      UDP_PORT: "40001"
+    depends_on:
+      infra-init:
+        condition: service_completed_successfully
