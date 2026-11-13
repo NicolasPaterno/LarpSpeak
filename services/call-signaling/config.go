@@ -8,16 +8,15 @@ import (
 )
 
 type config struct {
-	Port           string
-	RoomCapacity   int
-	RelayTimeout   time.Duration
-	TopicArn       string
-	RelayRequests  string
-	RelayResults   string
-	CallsTable     string
-	RoomsTable     string
-	OutboxTable    string
-	ProcessedTable string
+	Port            string
+	MaxParticipants int
+	RelayTimeout    time.Duration
+	TopicArn        string
+	RelayRequests   string
+	RelayResults    string
+	CallsTable      string
+	OutboxTable     string
+	ProcessedTable  string
 }
 
 func loadConfig() (config, error) {
@@ -35,7 +34,6 @@ func loadConfig() (config, error) {
 		RelayRequests:  need("RELAY_REQUESTS_QUEUE"),
 		RelayResults:   need("RELAY_RESULTS_QUEUE"),
 		CallsTable:     need("CALLS_TABLE"),
-		RoomsTable:     need("ROOMS_TABLE"),
 		OutboxTable:    need("OUTBOX_TABLE"),
 		ProcessedTable: need("PROCESSED_TABLE"),
 	}
@@ -43,8 +41,8 @@ func loadConfig() (config, error) {
 		return c, fmt.Errorf("missing env vars: %v", missing)
 	}
 	var err error
-	if c.RoomCapacity, err = strconv.Atoi(envOr("ROOM_CAPACITY", "10")); err != nil || c.RoomCapacity < 1 {
-		return c, fmt.Errorf("ROOM_CAPACITY must be a positive integer")
+	if c.MaxParticipants, err = strconv.Atoi(envOr("MAX_PARTICIPANTS", "10")); err != nil || c.MaxParticipants < 2 {
+		return c, fmt.Errorf("MAX_PARTICIPANTS must be an integer >= 2")
 	}
 	ms, err := strconv.Atoi(envOr("RELAY_TIMEOUT_MS", "3000"))
 	if err != nil || ms < 1 {

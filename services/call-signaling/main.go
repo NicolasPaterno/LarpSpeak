@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,11 +56,13 @@ func main() {
 	mux.HandleFunc("POST /calls", sg.handleCreate)
 	mux.HandleFunc("GET /calls/{id}", sg.handleGet)
 	mux.HandleFunc("POST /calls/{id}/end", sg.handleEnd)
+	mux.HandleFunc("POST /calls/{id}/join", sg.handleJoin)
+	mux.HandleFunc("POST /calls/{id}/leave", sg.handleLeave)
 	mux.HandleFunc("GET /users/{userId}/notifications", h.serve)
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
-	log.Info("listening", "addr", srv.Addr, "roomCapacity", cfg.RoomCapacity, "relayTimeout", cfg.RelayTimeout.String())
+	log.Info("listening", "addr", srv.Addr, "maxParticipants", cfg.MaxParticipants, "relayTimeout", cfg.RelayTimeout.String())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
@@ -67,12 +70,13 @@ func main() {
 }
 
 type createCallRequest struct {
-	CallerID  string   `json:"callerId"`
-	CalleeIDs []string `json:"calleeIds"`
-	RoomID    string   `json:"roomId"` // empty = 1:1 call in a private room
+	CallerID        string   `json:"callerId"`
+	CalleeIDs       []string `json:"calleeIds"`       // invited users, notified when the call is live
+	MaxParticipants int      `json:"maxParticipants"` // seats in the call; default 2 for 1:1, MAX_PARTICIPANTS otherwise
 }
 
 // handleCreate is the R3 async entry point: validate, run saga step 1, answer 202.
+// The creator is the first participant; invited users join with POST /calls/{id}/join.
 func (sg *saga) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req createCallRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || req.CallerID == "" {
@@ -80,35 +84,87 @@ func (sg *saga) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := call{
-		ID: uuid.New().String(), CallerID: req.CallerID, Status: statusPending, CreatedAt: sg.nowFn().UnixMilli(),
-		Participants: append([]string{req.CallerID}, req.CalleeIDs...),
+		ID: uuid.New().String(), CallerID: req.CallerID, Invited: req.CalleeIDs, Status: statusPending,
+		CreatedAt: sg.nowFn().UnixMilli(), Participants: []string{req.CallerID}, Taken: 1,
+		Kind: "group", Capacity: req.MaxParticipants,
 	}
-	c.Seats = len(c.Participants)
-	switch {
-	case req.RoomID != "":
-		c.Kind, c.RoomID = "group", req.RoomID
-	case len(req.CalleeIDs) == 1:
-		c.Kind, c.RoomID = "direct", "direct-"+c.ID
-	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "1:1 call needs exactly one callee; group call needs roomId"})
+	if c.Capacity == 0 {
+		c.Capacity = sg.cfg.MaxParticipants
+		if len(req.CalleeIDs) == 1 {
+			c.Kind, c.Capacity = "direct", 2
+		}
+	}
+	if c.Capacity < 2 || c.Capacity > sg.cfg.MaxParticipants {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("maxParticipants must be 2..%d", sg.cfg.MaxParticipants)})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	err := sg.start(ctx, c)
-	if errors.Is(err, errRoomFull) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "room full", "roomId": c.RoomID})
-		return
-	}
-	if err != nil {
+	if err := sg.start(ctx, c); err != nil {
 		sg.log.Error("create call failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
 		return
 	}
-	sg.log.Info("call requested", "correlationId", c.ID, "roomId", c.RoomID, "seats", c.Seats)
+	sg.log.Info("call requested", "correlationId", c.ID, "capacity", c.Capacity, "invited", len(c.Invited))
 	w.Header().Set("Location", "/calls/"+c.ID)
 	writeJSON(w, http.StatusAccepted, map[string]string{"callId": c.ID, "status": c.Status, "statusUrl": "/calls/" + c.ID})
+}
+
+type userRequest struct {
+	UserID string `json:"userId"`
+}
+
+func decodeUser(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var req userRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.UserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+		return "", false
+	}
+	return req.UserID, true
+}
+
+// handleJoin: POST /calls/{id}/join {userId} -> 200 with the relay address, 409 if full/inactive.
+func (sg *saga) handleJoin(w http.ResponseWriter, r *http.Request) {
+	user, ok := decodeUser(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	c, err := sg.join(ctx, r.PathValue("id"), user)
+	switch {
+	case errors.Is(err, errRoomFull), errors.Is(err, errNotActive), errors.Is(err, errAlreadyIn):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		sg.log.Error("join failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"callId": c.ID, "relayHost": c.RelayHost, "relayPort": c.RelayPort,
+			"participants": c.Participants, "taken": c.Taken, "capacity": c.Capacity,
+		})
+	}
+}
+
+// handleLeave: POST /calls/{id}/leave {userId} -> 202; the last one out ends the call.
+func (sg *saga) handleLeave(w http.ResponseWriter, r *http.Request) {
+	user, ok := decodeUser(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	err := sg.leave(ctx, r.PathValue("id"), user)
+	switch {
+	case errors.Is(err, errNotActive), errors.Is(err, errNotIn), errors.Is(err, errStateChanged):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		sg.log.Error("leave failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]string{"callId": r.PathValue("id"), "userId": user, "status": "left"})
+	}
 }
 
 func (sg *saga) handleGet(w http.ResponseWriter, r *http.Request) {

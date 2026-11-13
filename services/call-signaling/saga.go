@@ -5,26 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
-// saga orchestrates call setup: reserve seats -> request relay -> activate,
-// compensating (release seats, notify caller, publish CallFailed) when the relay
-// fails, times out, or answers too late.
+// saga orchestrates call setup: create call (creator holds a seat) -> request
+// relay -> activate, compensating (free seats, notify creator, publish CallFailed)
+// when the relay fails, times out, or answers too late. It also handles the
+// channel lifecycle afterwards: join, leave, end.
 type saga struct {
 	st    *store
 	hub   *hub
 	log   *slog.Logger
 	cfg   config
 	nowFn func() time.Time
-}
-
-type relayRequested struct {
-	CallID       string   `json:"callId"`
-	RoomID       string   `json:"roomId"`
-	Participants []string `json:"participants"`
 }
 
 type relayResult struct {
@@ -35,16 +31,13 @@ type relayResult struct {
 	Reason  string `json:"reason"`
 }
 
-// start is step 1: seats + call + RelayRequested outbox entry, atomically.
+// start is step 1: call (creator inside, 1 seat taken) + RelayRequested outbox entry, atomically.
 func (sg *saga) start(ctx context.Context, c call) error {
-	if c.Seats > sg.cfg.RoomCapacity {
-		return errRoomFull
-	}
 	put, err := sg.st.putCall(c)
 	if err != nil {
 		return err
 	}
-	e, err := newEnvelope("RelayRequested", c.ID, relayRequested{c.ID, c.RoomID, c.Participants})
+	e, err := newEnvelope("RelayRequested", c.ID, map[string]any{"callId": c.ID, "participants": c.Participants})
 	if err != nil {
 		return err
 	}
@@ -52,10 +45,7 @@ func (sg *saga) start(ctx context.Context, c call) error {
 	if err != nil {
 		return err
 	}
-	codes, err := sg.st.commit(ctx, sg.st.reserveSeats(c.RoomID, c.Seats), put, out)
-	if conditionFailed(codes, 0) {
-		return errRoomFull
-	}
+	_, err = sg.st.commit(ctx, put, out)
 	return err
 }
 
@@ -80,16 +70,12 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 
 	case e.Type == "RelayClosed" && c.Status == statusActive:
 		// media-relay saw no audio for too long: end the abandoned call.
-		if err := sg.end(ctx, c, "relay "+r.Reason, dedupe); err != nil {
-			return err
-		}
-		sg.hub.notify(c.CallerID, "call_ended", map[string]string{"callId": c.ID, "reason": "relay " + r.Reason})
-		return nil
+		return sg.end(ctx, c, "relay "+r.Reason, dedupe)
 
 	case e.Type == "RelayAllocated" && c.Status == statusPending:
 		now := sg.nowFn().UnixMilli()
 		started, err := newEnvelope("CallStarted", c.ID, map[string]any{
-			"callId": c.ID, "roomId": c.RoomID, "kind": c.Kind, "relayId": r.RelayID, "participants": c.Participants,
+			"callId": c.ID, "kind": c.Kind, "capacity": c.Capacity, "relayId": r.RelayID, "participants": c.Participants,
 		})
 		if err != nil {
 			return err
@@ -98,17 +84,14 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 		if err != nil {
 			return err
 		}
-		set := map[string]types.AttributeValue{"relayId": str(r.RelayID), "relayHost": str(r.Host), "relayPort": num(int64(r.Port)), "startedAt": num(now)}
-		if err := sg.commitOnce(ctx, dedupe, sg.st.transition(c.ID, statusPending, statusActive, set), out); err != nil {
+		fields := map[string]types.AttributeValue{"relayId": str(r.RelayID), "relayHost": str(r.Host), "relayPort": num(int64(r.Port)), "startedAt": num(now)}
+		if err := sg.commitOnce(ctx, dedupe, sg.st.transition(c.ID, statusPending, statusActive, fields), out); err != nil {
 			return err
 		}
 		sg.log.Info("call active", "correlationId", c.ID, "relayId", r.RelayID)
-		relay := map[string]any{"callId": c.ID, "relayHost": r.Host, "relayPort": r.Port}
-		sg.hub.notify(c.CallerID, "call_active", relay)
-		for _, p := range c.Participants {
-			if p != c.CallerID {
-				sg.hub.notify(p, "incoming_call", map[string]any{"callId": c.ID, "from": c.CallerID, "relayHost": r.Host, "relayPort": r.Port})
-			}
+		sg.hub.notify(c.CallerID, "call_active", map[string]any{"callId": c.ID, "relayHost": r.Host, "relayPort": r.Port})
+		for _, u := range c.Invited {
+			sg.hub.notify(u, "incoming_call", map[string]any{"callId": c.ID, "from": c.CallerID})
 		}
 		return nil
 
@@ -141,9 +124,8 @@ func (sg *saga) compensate(ctx context.Context, c *call, reason string, extra ..
 	if err != nil {
 		return err
 	}
-	items := append(extra,
-		sg.st.transition(c.ID, statusPending, statusFailed, map[string]types.AttributeValue{"reason": str(reason)}),
-		sg.st.releaseSeats(c.RoomID, c.Seats), out)
+	fields := map[string]types.AttributeValue{"reason": str(reason), "taken": num(0)} // seats freed
+	items := append(extra, sg.st.transition(c.ID, statusPending, statusFailed, fields), out)
 	codes, err := sg.st.commit(ctx, items...)
 	if len(extra) > 0 && conditionFailed(codes, 0) {
 		return errDuplicate
@@ -154,13 +136,106 @@ func (sg *saga) compensate(ctx context.Context, c *call, reason string, extra ..
 	if err != nil {
 		return err
 	}
-	sg.log.Warn("call compensated", "correlationId", c.ID, "reason", reason, "seatsReleased", c.Seats)
+	sg.log.Warn("call compensated", "correlationId", c.ID, "reason", reason, "seatsReleased", c.Taken)
 	sg.hub.notify(c.CallerID, "call_failed", map[string]string{"callId": c.ID, "reason": reason})
 	return nil
 }
 
-// end finishes an active call (hang-up or idle relay) and publishes CallEnded,
-// consumed by media-relay and audit-vault. extra items (the dedupe marker) go first.
+// join puts a user into an active call if a seat is free (R2).
+func (sg *saga) join(ctx context.Context, id, user string) (*call, error) {
+	e, err := newEnvelope("ParticipantJoined", id, map[string]string{"callId": id, "userId": user})
+	if err != nil {
+		return nil, err
+	}
+	out, err := sg.st.outbox(destTopic, e)
+	if err != nil {
+		return nil, err
+	}
+	codes, err := sg.st.commit(ctx, sg.st.join(id, user), out)
+	if conditionFailed(codes, 0) {
+		return nil, sg.whyRejected(ctx, id, user)
+	}
+	if err != nil {
+		return nil, err
+	}
+	c, err := sg.st.getCall(ctx, id)
+	if err != nil || c == nil {
+		return nil, fmt.Errorf("reading call after join: %w", err)
+	}
+	sg.log.Info("participant joined", "correlationId", id, "userId", user, "taken", c.Taken, "capacity", c.Capacity)
+	sg.broadcast(c, user, "participant_joined")
+	return c, nil
+}
+
+// whyRejected re-reads the call to tell the client why its join failed.
+func (sg *saga) whyRejected(ctx context.Context, id, user string) error {
+	c, err := sg.st.getCall(ctx, id)
+	switch {
+	case err != nil:
+		return err
+	case c == nil || c.Status != statusActive:
+		return errNotActive
+	case c.has(user):
+		return errAlreadyIn
+	default:
+		return errRoomFull
+	}
+}
+
+// leave frees the user's seat; the last one out ends the call. Retries when
+// someone else joined/left between our read and our write.
+func (sg *saga) leave(ctx context.Context, id, user string) error {
+	for range 3 {
+		c, err := sg.st.getCall(ctx, id)
+		switch {
+		case err != nil:
+			return err
+		case c == nil || c.Status != statusActive:
+			return errNotActive
+		case !c.has(user):
+			return errNotIn
+		}
+		now := sg.nowFn().UnixMilli()
+		last := c.Taken == 1
+		left, err := newEnvelope("ParticipantLeft", id, map[string]string{"callId": id, "userId": user})
+		if err != nil {
+			return err
+		}
+		items := []types.TransactWriteItem{sg.st.leave(id, user, c.Taken, last, now)}
+		out, err := sg.st.outbox(destTopic, left)
+		if err != nil {
+			return err
+		}
+		items = append(items, out)
+		if last {
+			ended, err := newEnvelope("CallEnded", id, map[string]any{
+				"callId": id, "relayId": c.RelayID, "durationMs": now - c.StartedAt, "reason": "everyone left",
+			})
+			if err != nil {
+				return err
+			}
+			if out, err = sg.st.outbox(destTopic, ended); err != nil {
+				return err
+			}
+			items = append(items, out)
+		}
+		codes, err := sg.st.commit(ctx, items...)
+		if conditionFailed(codes, 0) {
+			continue // counter moved under us: read again
+		}
+		if err != nil {
+			return err
+		}
+		sg.log.Info("participant left", "correlationId", id, "userId", user, "callEnded", last)
+		c.Participants = slices.DeleteFunc(c.Participants, func(p string) bool { return p == user })
+		sg.broadcast(c, user, "participant_left")
+		return nil
+	}
+	return errStateChanged
+}
+
+// end finishes an active call for everyone (hang-up or idle relay) and publishes
+// CallEnded, consumed by media-relay and audit-vault. extra items (dedupe) go first.
 func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.TransactWriteItem) error {
 	now := sg.nowFn().UnixMilli()
 	ended, err := newEnvelope("CallEnded", c.ID, map[string]any{
@@ -173,9 +248,8 @@ func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.
 	if err != nil {
 		return err
 	}
-	items := append(extra,
-		sg.st.transition(c.ID, statusActive, statusEnded, map[string]types.AttributeValue{"endedAt": num(now), "reason": str(reason)}),
-		sg.st.releaseSeats(c.RoomID, c.Seats), out)
+	fields := map[string]types.AttributeValue{"endedAt": num(now), "reason": str(reason), "taken": num(0)}
+	items := append(extra, sg.st.transition(c.ID, statusActive, statusEnded, fields), out)
 	codes, err := sg.st.commit(ctx, items...)
 	if len(extra) > 0 && conditionFailed(codes, 0) {
 		return errDuplicate
@@ -187,7 +261,19 @@ func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.
 		return err
 	}
 	sg.log.Info("call ended", "correlationId", c.ID, "reason", reason)
+	for _, u := range c.Participants {
+		sg.hub.notify(u, "call_ended", map[string]string{"callId": c.ID, "reason": reason})
+	}
 	return nil
+}
+
+// broadcast tells everyone still in the call that user joined or left.
+func (sg *saga) broadcast(c *call, user, event string) {
+	for _, u := range c.Participants {
+		if u != user {
+			sg.hub.notify(u, event, map[string]any{"callId": c.ID, "userId": user, "participants": c.Participants})
+		}
+	}
 }
 
 // sweepTimeouts compensates calls that waited longer than RELAY_TIMEOUT_MS.

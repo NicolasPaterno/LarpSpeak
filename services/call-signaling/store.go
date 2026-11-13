@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,18 +23,24 @@ const (
 )
 
 var (
-	errRoomFull     = errors.New("room full")
+	errRoomFull     = errors.New("call is full")
+	errNotActive    = errors.New("call is not active")
+	errAlreadyIn    = errors.New("user already in call")
+	errNotIn        = errors.New("user not in call")
 	errDuplicate    = errors.New("message already processed")
 	errStateChanged = errors.New("call state changed concurrently")
 )
 
+// call is a voice channel: up to Capacity participants talk at the same time.
+// Taken is the seat counter guarded by conditional writes (R2).
 type call struct {
 	ID           string   `json:"callId" dynamodbav:"pk"`
-	RoomID       string   `json:"roomId" dynamodbav:"roomId"`
 	Kind         string   `json:"kind" dynamodbav:"kind"`
 	CallerID     string   `json:"callerId" dynamodbav:"callerId"`
-	Participants []string `json:"participants" dynamodbav:"participants"`
-	Seats        int      `json:"seats" dynamodbav:"seats"`
+	Invited      []string `json:"invited,omitempty" dynamodbav:"invited,omitempty"`
+	Participants []string `json:"participants" dynamodbav:"participants,stringset,omitempty"`
+	Taken        int      `json:"taken" dynamodbav:"taken"`
+	Capacity     int      `json:"capacity" dynamodbav:"capacity"`
 	Status       string   `json:"status" dynamodbav:"status"`
 	Reason       string   `json:"reason,omitempty" dynamodbav:"reason,omitempty"`
 	RelayID      string   `json:"relayId,omitempty" dynamodbav:"relayId,omitempty"`
@@ -44,6 +51,8 @@ type call struct {
 	EndedAt      int64    `json:"endedAt,omitempty" dynamodbav:"endedAt,omitempty"`
 }
 
+func (c *call) has(user string) bool { return slices.Contains(c.Participants, user) }
+
 type store struct {
 	db  *dynamodb.Client
 	cfg config
@@ -53,6 +62,7 @@ func str(s string) types.AttributeValue { return &types.AttributeValueMemberS{Va
 func num(n int64) types.AttributeValue {
 	return &types.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
 }
+func set(s string) types.AttributeValue { return &types.AttributeValueMemberSS{Value: []string{s}} }
 func key(id string) map[string]types.AttributeValue {
 	return map[string]types.AttributeValue{"pk": str(id)}
 }
@@ -83,27 +93,40 @@ func (s *store) pendingCalls(ctx context.Context) ([]call, error) {
 
 // --- transaction items ---
 
-// reserveSeats is the R2 concurrency control: the update only succeeds while
-// taken + seats <= capacity, atomically, so concurrent requests cannot over-book.
-func (s *store) reserveSeats(roomID string, seats int) types.TransactWriteItem {
+// join is the R2 concurrency control: one atomic conditional update takes a seat
+// only while the call is active, not full, and the user is not already inside.
+// 100 concurrent joins on 10 free seats => exactly 10 succeed.
+func (s *store) join(callID, user string) types.TransactWriteItem {
 	return types.TransactWriteItem{Update: &types.Update{
-		TableName:           &s.cfg.RoomsTable,
-		Key:                 key(roomID),
-		UpdateExpression:    aws.String("SET taken = if_not_exists(taken, :zero) + :n"),
-		ConditionExpression: aws.String("attribute_not_exists(taken) OR taken <= :max"),
+		TableName:                aws.String(s.cfg.CallsTable),
+		Key:                      key(callID),
+		UpdateExpression:         aws.String("SET taken = taken + :one ADD participants :u"),
+		ConditionExpression:      aws.String("#s = :active AND taken < #cap AND NOT contains(participants, :uid)"),
+		ExpressionAttributeNames: map[string]string{"#s": "status", "#cap": "capacity"}, // both are reserved words
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":zero": num(0), ":n": num(int64(seats)), ":max": num(int64(s.cfg.RoomCapacity - seats)),
+			":one": num(1), ":u": set(user), ":uid": str(user), ":active": str(statusActive),
 		},
 	}}
 }
 
-func (s *store) releaseSeats(roomID string, seats int) types.TransactWriteItem {
+// leave frees the user's seat. takenNow pins the counter so two "last" leavers
+// cannot both think they are last; lastOne also ends the call in the same update.
+func (s *store) leave(callID, user string, takenNow int, lastOne bool, now int64) types.TransactWriteItem {
+	expr := "SET taken = taken - :one"
+	vals := map[string]types.AttributeValue{
+		":one": num(1), ":u": set(user), ":uid": str(user), ":active": str(statusActive), ":n": num(int64(takenNow)),
+	}
+	if lastOne {
+		expr += ", #s = :ended, endedAt = :now, reason = :why"
+		vals[":ended"], vals[":now"], vals[":why"] = str(statusEnded), num(now), str("everyone left")
+	}
 	return types.TransactWriteItem{Update: &types.Update{
-		TableName:                 &s.cfg.RoomsTable,
-		Key:                       key(roomID),
-		UpdateExpression:          aws.String("SET taken = taken - :n"),
-		ConditionExpression:       aws.String("taken >= :n"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":n": num(int64(seats))},
+		TableName:                 aws.String(s.cfg.CallsTable),
+		Key:                       key(callID),
+		UpdateExpression:          aws.String(expr + " DELETE participants :u"),
+		ConditionExpression:       aws.String("#s = :active AND contains(participants, :uid) AND taken = :n"),
+		ExpressionAttributeNames:  map[string]string{"#s": "status"},
+		ExpressionAttributeValues: vals,
 	}}
 }
 
@@ -131,10 +154,10 @@ func (s *store) outbox(dest string, e envelope) (types.TransactWriteItem, error)
 }
 
 // transition moves a call from one status to another, failing if someone else moved it first.
-func (s *store) transition(id, from, to string, set map[string]types.AttributeValue) types.TransactWriteItem {
+func (s *store) transition(id, from, to string, fields map[string]types.AttributeValue) types.TransactWriteItem {
 	expr := "SET #s = :to"
 	vals := map[string]types.AttributeValue{":from": str(from), ":to": str(to)}
-	for k, v := range set {
+	for k, v := range fields {
 		expr += ", " + k + " = :" + k
 		vals[":"+k] = v
 	}
