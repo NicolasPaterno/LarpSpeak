@@ -77,7 +77,7 @@ func (sg *saga) moveOut(ctx context.Context, user, target string) error {
 	return nil
 }
 
-// onRelayResult handles RelayAllocated / RelayFailed / ParticipantTimedOut from media-relay.
+// onRelayResult handles RelayAllocated / RelayFailed / RelayMoved / ParticipantTimedOut from media-relay.
 func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	var r relayResult
 	if err := json.Unmarshal(e.Payload, &r); err != nil || r.CallID == "" {
@@ -95,6 +95,18 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	switch {
 	case e.Type == "RelayFailed" && c.Status == statusPending:
 		return sg.compensate(ctx, c, "relay failed: "+r.Reason, dedupe)
+
+	case e.Type == "RelayMoved" && c.Status == statusActive:
+		// The relay replica died and another one adopted the call: point everyone to it.
+		fields := map[string]types.AttributeValue{"relayHost": str(r.Host), "relayPort": num(int64(r.Port))}
+		if err := sg.commitOnce(ctx, dedupe, sg.st.transition(c.ID, statusActive, statusActive, fields)); err != nil {
+			return err
+		}
+		sg.log.Warn("relay moved", "correlationId", c.ID, "host", r.Host, "port", r.Port)
+		for _, u := range c.Participants {
+			sg.hub.notify(u, "relay_moved", map[string]any{"callId": c.ID, "relayHost": r.Host, "relayPort": r.Port})
+		}
+		return nil
 
 	case e.Type == "ParticipantTimedOut":
 		// The user's client stopped sending packets (crash, lost network): remove
@@ -144,7 +156,7 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 		sg.log.Warn("late relay released", "correlationId", c.ID, "status", c.Status, "relayId", r.RelayID)
 		return sg.commitOnce(ctx, dedupe, out)
 
-	default: // RelayFailed for a call already past PENDING: nothing to do.
+	default: // RelayFailed/RelayMoved for a call no longer in that state: nothing to do.
 		return sg.commitOnce(ctx, dedupe)
 	}
 }
