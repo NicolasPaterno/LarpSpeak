@@ -18,6 +18,7 @@ type CallStore interface {
 	CurrentCall(ctx context.Context, user string) (string, error)
 	ForgetUser(ctx context.Context, user, callID string)  // best effort
 	AddInvite(ctx context.Context, id, user string) error // ErrNotActive if the call is not active
+	MakeGroup(ctx context.Context, id string) error       // direct -> group; no-op if already a group
 
 	// Create: [call, RelayRequested, claim creator]. ErrStateChanged: creator is in another call.
 	Create(ctx context.Context, c domain.Call, out domain.Outgoing) error

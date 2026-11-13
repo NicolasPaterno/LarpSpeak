@@ -45,12 +45,12 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	c := domain.Call{
 		ID: uuid.New().String(), CallerID: req.CallerID, Invited: req.CalleeIDs, Status: domain.StatusPending,
 		CreatedAt: sg.NowFn().UnixMilli(), Participants: []string{req.CallerID}, Taken: 1,
-		Kind: "group", Capacity: req.MaxParticipants,
+		Kind: domain.KindGroup, Capacity: req.MaxParticipants,
 	}
 	if c.Capacity == 0 {
 		c.Capacity = sg.Cfg.MaxParticipants
 		if len(req.CalleeIDs) == 1 {
-			c.Kind, c.Capacity = "direct", 2
+			c.Kind = domain.KindDirect // 1:1; becomes a group when a third person joins or is invited
 		}
 	}
 	if c.Capacity < 2 || c.Capacity > sg.Cfg.MaxParticipants {

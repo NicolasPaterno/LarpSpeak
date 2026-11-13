@@ -196,8 +196,26 @@ func (s *Service) Join(ctx context.Context, id, user string) (*domain.Call, erro
 		return nil, fmt.Errorf("reading call after join: %w", err)
 	}
 	s.Log.Info("participant joined", "correlationId", id, "userId", user, "taken", c.Taken, "capacity", c.Capacity)
+	if c.Taken > 2 {
+		s.makeGroup(ctx, c)
+	}
 	s.broadcast(c, user, "participant_joined")
 	return c, nil
+}
+
+// makeGroup turns a direct (1:1) call into a group call, like Discord does when
+// a third person enters a DM call. Best effort: it is only a label, and the
+// next join or invite retries it.
+func (s *Service) makeGroup(ctx context.Context, c *domain.Call) {
+	if c.Kind != domain.KindDirect {
+		return
+	}
+	if err := s.St.MakeGroup(ctx, c.ID); err != nil {
+		s.Log.Warn("call kind update failed", "correlationId", c.ID, "err", err)
+		return
+	}
+	c.Kind = domain.KindGroup
+	s.Log.Info("call became group", "correlationId", c.ID)
 }
 
 // canJoin says whether user could join call id right now.
@@ -284,6 +302,9 @@ func (s *Service) Invite(ctx context.Context, id, from, to string) error {
 	if !slices.Contains(c.Invited, to) {
 		if err := s.St.AddInvite(ctx, id, to); err != nil {
 			return err
+		}
+		if !c.Has(to) {
+			s.makeGroup(ctx, c) // someone new is coming: no longer 1:1
 		}
 	}
 	s.Hub.Notify(to, "incoming_call", map[string]any{"callId": id, "from": from})

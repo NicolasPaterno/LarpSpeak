@@ -13,6 +13,9 @@ const (
 	StatusFailed  = "FAILED"
 	StatusEnded   = "ENDED"
 
+	KindDirect = "direct" // 1:1 call, like a Discord DM call
+	KindGroup  = "group"
+
 	DestTopic = "call-events" // outbox destination: SNS topic; anything else is an SQS queue name
 )
 

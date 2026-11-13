@@ -114,6 +114,22 @@ func (s *Store) AddInvite(ctx context.Context, id, user string) error {
 	return err
 }
 
+// MakeGroup turns a direct call into a group call. Already a group: nothing to do.
+func (s *Store) MakeGroup(ctx context.Context, id string) error {
+	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Cfg.CallsTable,
+		Key:                       key(id),
+		UpdateExpression:          aws.String("SET kind = :group"),
+		ConditionExpression:       aws.String("kind = :direct"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":group": str(domain.KindGroup), ":direct": str(domain.KindDirect)},
+	})
+	var ccf *types.ConditionalCheckFailedException
+	if errors.As(err, &ccf) {
+		return nil
+	}
+	return err
+}
+
 // --- atomic units of work ---
 
 // Create is saga step 1: [call (creator inside), RelayRequested outbox, claim creator].

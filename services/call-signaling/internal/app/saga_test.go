@@ -77,6 +77,11 @@ func (f *fakeStore) AddInvite(_ context.Context, id, u string) error {
 	f.calls[id].Invited = append(f.calls[id].Invited, u)
 	return nil
 }
+func (f *fakeStore) MakeGroup(_ context.Context, id string) error {
+	f.ops = append(f.ops, "MakeGroup:")
+	f.calls[id].Kind = domain.KindGroup
+	return nil
+}
 func (f *fakeStore) Create(_ context.Context, c domain.Call, out domain.Outgoing) error {
 	if err := f.write("Create", "", out); err != nil {
 		return err
@@ -315,5 +320,50 @@ func TestInviteByNonParticipant(t *testing.T) {
 	}
 	if len(hub.events) != 0 {
 		t.Fatalf("notified: %v", hub.events)
+	}
+}
+
+func direct() domain.Call {
+	return domain.Call{ID: "c1", Kind: domain.KindDirect, CallerID: "ana", Invited: []string{"bob"},
+		Participants: []string{"ana", "bob"}, Taken: 2, Capacity: 10, Status: domain.StatusActive}
+}
+
+func TestDirectCallBecomesGroupOnThirdJoin(t *testing.T) {
+	st := newFake(direct())
+	sg, _ := newService(st)
+	c, err := sg.Join(context.Background(), "c1", "carl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kind != domain.KindGroup || st.calls["c1"].Kind != domain.KindGroup {
+		t.Fatalf("kind %q (stored %q), want group", c.Kind, st.calls["c1"].Kind)
+	}
+}
+
+func TestDirectCallStaysDirectForItsPair(t *testing.T) {
+	c := direct()
+	c.Participants, c.Taken = []string{"ana"}, 1
+	st := newFake(c)
+	sg, _ := newService(st)
+	ctx := context.Background()
+	if err := sg.Invite(ctx, "c1", "ana", "bob"); err != nil { // re-invite the 1:1 callee
+		t.Fatal(err)
+	}
+	if _, err := sg.Join(ctx, "c1", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if st.calls["c1"].Kind != domain.KindDirect {
+		t.Fatalf("kind %q, want direct", st.calls["c1"].Kind)
+	}
+}
+
+func TestInviteIntoDirectCallMakesGroup(t *testing.T) {
+	st := newFake(direct())
+	sg, hub := newService(st)
+	if err := sg.Invite(context.Background(), "c1", "ana", "carl"); err != nil {
+		t.Fatal(err)
+	}
+	if st.calls["c1"].Kind != domain.KindGroup || !slices.Contains(hub.events, "carl:incoming_call") {
+		t.Fatalf("kind %q events %v", st.calls["c1"].Kind, hub.events)
 	}
 }
