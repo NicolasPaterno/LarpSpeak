@@ -52,7 +52,7 @@ func main() {
 	go b.consume(ctx, cfg.RelayRequests, r.onRelayRequest) // competing consumers across replicas (R4)
 	go b.consume(ctx, cfg.CallEvents, r.onCallEvent)
 	go r.sweep(ctx)
-	go r.serveUDP(conn)
+	go r.serveUDP(ctx, conn)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {

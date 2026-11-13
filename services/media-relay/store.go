@@ -28,7 +28,7 @@ type session struct {
 	RelayID      string   `dynamodbav:"relayId"`
 	Host         string   `dynamodbav:"host"`
 	Port         int      `dynamodbav:"port"`
-	Participants []string `dynamodbav:"participants"`
+	Participants []string `dynamodbav:"participants,stringset,omitempty"`
 	State        string   `dynamodbav:"state"`
 	Reason       string   `dynamodbav:"reason,omitempty"`
 }
@@ -80,6 +80,20 @@ func (s *store) release(callID, reason string) types.TransactWriteItem {
 		ConditionExpression:       aws.String("#s = :alloc"),
 		ExpressionAttributeNames:  map[string]string{"#s": "state"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{":rel": str(stateReleased), ":alloc": str(stateAllocated), ":why": str(reason)},
+	}}
+}
+
+// member adds ("ADD") or removes ("DELETE") a user from an allocated session.
+func (s *store) member(callID, op, user string) types.TransactWriteItem {
+	return types.TransactWriteItem{Update: &types.Update{
+		TableName:                &s.cfg.SessionsTable,
+		Key:                      key(callID),
+		UpdateExpression:         aws.String(op + " participants :u"),
+		ConditionExpression:      aws.String("#s = :alloc"),
+		ExpressionAttributeNames: map[string]string{"#s": "state"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":u": &types.AttributeValueMemberSS{Value: []string{user}}, ":alloc": str(stateAllocated),
+		},
 	}}
 }
 

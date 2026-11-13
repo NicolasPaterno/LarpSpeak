@@ -26,7 +26,10 @@ func TestParseHeader(t *testing.T) {
 	if !ok || c != "call-1" || u != "ana" {
 		t.Fatalf("got %q %q %v", c, u, ok)
 	}
-	for _, bad := range []string{"no newline", "onlycall\nx", " ana\nx", "call-1 \nx"} {
+	if c, u, ok := parseHeader([]byte("call-1 ana 42\nAUDIO")); !ok || c != "call-1" || u != "ana" {
+		t.Fatalf("with seq: got %q %q %v", c, u, ok)
+	}
+	for _, bad := range []string{"no newline", "onlycall\nx", " \nx", "call-1 \nx"} {
 		if _, _, ok := parseHeader([]byte(bad)); ok {
 			t.Errorf("%q accepted", bad)
 		}

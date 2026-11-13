@@ -21,6 +21,7 @@ type liveSession struct {
 	participants map[string]bool
 	addrs        map[string]*net.UDPAddr
 	lastAudio    time.Time
+	lastRefresh  time.Time // last reload of participants from DynamoDB
 }
 
 type relay struct {
@@ -36,6 +37,7 @@ type relay struct {
 type callRef struct {
 	CallID       string   `json:"callId"`
 	RelayID      string   `json:"relayId"`
+	UserID       string   `json:"userId"`
 	Participants []string `json:"participants"`
 }
 
@@ -67,8 +69,75 @@ func (r *relay) onCallEvent(ctx context.Context, e envelope) error {
 		return r.release(ctx, e, ref.CallID, "call ended")
 	case "CallFailed":
 		return r.release(ctx, e, ref.CallID, "call failed")
+	case "ParticipantJoined":
+		return r.member(ctx, e, ref, "ADD")
+	case "ParticipantLeft":
+		return r.member(ctx, e, ref, "DELETE")
 	}
 	return nil // CallStarted: nothing to do here
+}
+
+// member updates who may send audio. Any replica may receive the event: the
+// DynamoDB session is updated here, and the owning replica picks the change up
+// on its next refresh (or immediately, if it is this one).
+func (r *relay) member(ctx context.Context, e envelope, ref callRef, op string) error {
+	if ref.UserID == "" {
+		return fmt.Errorf("bad %s payload", e.Type)
+	}
+	dedupe := r.st.markProcessed(e.MessageID)
+	err := r.st.commit(ctx, dedupe, r.st.member(ref.CallID, op, ref.UserID))
+	if errors.Is(err, errReleased) { // relay gone: nothing to update
+		return r.st.commit(ctx, dedupe)
+	}
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if ls := r.live[ref.CallID]; ls != nil {
+		if op == "ADD" {
+			ls.participants[ref.UserID] = true
+		} else {
+			delete(ls.participants, ref.UserID)
+			delete(ls.addrs, ref.UserID)
+		}
+	}
+	r.mu.Unlock()
+	r.log.Info("participants updated", "correlationId", ref.CallID, "userId", ref.UserID, "op", op)
+	return nil
+}
+
+// refresh reloads a live session's participants from DynamoDB, at most every 500ms.
+func (r *relay) refresh(ctx context.Context, callID string) {
+	r.mu.Lock()
+	ls := r.live[callID]
+	if ls == nil || time.Since(ls.lastRefresh) < 500*time.Millisecond {
+		r.mu.Unlock()
+		return
+	}
+	ls.lastRefresh = time.Now()
+	r.mu.Unlock()
+
+	ss, err := r.st.getSession(ctx, callID)
+	if err != nil {
+		return
+	}
+	if ss == nil || ss.State == stateReleased {
+		r.untrack(callID)
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ls := r.live[callID]; ls != nil {
+		ls.participants = map[string]bool{}
+		for _, p := range ss.Participants {
+			ls.participants[p] = true
+		}
+		for u := range ls.addrs {
+			if !ls.participants[u] {
+				delete(ls.addrs, u)
+			}
+		}
+	}
 }
 
 func (r *relay) allocate(ctx context.Context, e envelope, ref callRef) error {
@@ -154,10 +223,11 @@ func (r *relay) untrack(callID string) {
 	r.mu.Unlock()
 }
 
-// serveUDP forwards audio. Packet = "<callId> <userId>\n" + audio bytes.
+// serveUDP forwards audio. Packet = "<callId> <userId> [anything]\n" + payload;
+// the relay only reads callId and userId and forwards the packet untouched.
 // The sender's address is learned from its packets; the packet is copied to
 // every other participant whose address is known. No call-signaling involved.
-func (r *relay) serveUDP(conn *net.UDPConn) {
+func (r *relay) serveUDP(ctx context.Context, conn *net.UDPConn) {
 	buf := make([]byte, 64*1024)
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
@@ -173,7 +243,10 @@ func (r *relay) serveUDP(conn *net.UDPConn) {
 		ls := r.live[callID]
 		if ls == nil || !ls.participants[userID] {
 			r.mu.Unlock()
-			continue // unknown call or not a participant: drop
+			if ls != nil {
+				go r.refresh(ctx, callID) // maybe joined via another replica
+			}
+			continue // unknown call or not (yet) a participant: drop
 		}
 		ls.addrs[userID] = from
 		ls.lastAudio = time.Now()
@@ -192,14 +265,11 @@ func (r *relay) serveUDP(conn *net.UDPConn) {
 
 func parseHeader(p []byte) (callID, userID string, ok bool) {
 	line, _, found := bytes.Cut(p, []byte("\n"))
-	if !found {
+	f := bytes.Fields(line)
+	if !found || len(f) < 2 {
 		return "", "", false
 	}
-	c, u, found := bytes.Cut(line, []byte(" "))
-	if !found || len(c) == 0 || len(u) == 0 {
-		return "", "", false
-	}
-	return string(c), string(u), true
+	return string(f[0]), string(f[1]), true
 }
 
 // sweep closes relays with no audio for RELAY_IDLE_TIMEOUT_MS (abandoned calls)
@@ -222,10 +292,7 @@ func (r *relay) sweep(ctx context.Context) {
 				r.closeIdle(ctx, callID, ls.relayID)
 				continue
 			}
-			ss, err := r.st.getSession(ctx, callID)
-			if err == nil && (ss == nil || ss.State == stateReleased) {
-				r.untrack(callID)
-			}
+			r.refresh(ctx, callID) // drops sessions released elsewhere, syncs participants
 		}
 	}
 }
