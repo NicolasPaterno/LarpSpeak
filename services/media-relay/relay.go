@@ -53,6 +53,10 @@ type relay struct {
 	unhealthyAt atomic.Int64 // unix ns of the last failed ping/scan; adoption waits for a stable link
 	probeAddr   string       // this pod's /health address inside the network (container IP:port)
 	pingsPaused atomic.Bool  // fault injection (SIGUSR1): simulate losing the link to DynamoDB
+
+	term      atomic.Int64            // leader term we hold; 0 = follower
+	inherited atomic.Pointer[suspect] // previous leader, handed from elect to the watch loop
+	lookups   map[string]time.Time    // last pickUp read per call id (guarded by mu)
 }
 
 type callRef struct {
@@ -266,6 +270,8 @@ func (r *relay) serveUDP(ctx context.Context, conn *net.UDPConn) {
 			r.mu.Unlock()
 			if ls != nil {
 				go r.refresh(ctx, callID) // maybe joined via another replica
+			} else {
+				go r.pickUp(ctx, callID) // maybe moved here by the leader after a failover
 			}
 			continue // unknown call or not (yet) a participant: drop
 		}

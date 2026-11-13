@@ -47,7 +47,7 @@ func main() {
 	}
 	st := &store{db: dynamodb.NewFromConfig(awsCfg), cfg: cfg}
 	b := &bus{sqs: sqs.NewFromConfig(awsCfg), log: log, urls: map[string]string{}}
-	r := &relay{st: st, log: log, cfg: cfg, id: hostname, host: advertisedHost(hostname), live: map[string]*liveSession{},
+	r := &relay{st: st, log: log, cfg: cfg, id: hostname, host: advertisedHost(hostname), live: map[string]*liveSession{}, lookups: map[string]time.Time{},
 		probeAddr: net.JoinHostPort(containerIP(hostname), cfg.Port)}
 	// Fault injection for demos: `docker kill -s USR1 <pod>` pauses/resumes this pod's
 	// pings, as if it lost its link to DynamoDB while still forwarding audio.
@@ -71,6 +71,11 @@ func main() {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "media-relay", "replica": hostname})
+	})
+	// The leader calls this after moving a call here, so we forward it before the first packet.
+	mux.HandleFunc("POST /adopt", func(w http.ResponseWriter, req *http.Request) {
+		go r.pickUp(context.WithoutCancel(req.Context()), req.URL.Query().Get("callId"))
+		w.WriteHeader(http.StatusAccepted)
 	})
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()); _ = conn.Close() }()
