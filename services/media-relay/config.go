@@ -17,6 +17,7 @@ type config struct {
 	RelayResults       string
 	CallEvents         string
 	SessionsTable      string
+	NodesTable         string
 	OutboxTable        string
 	ProcessedTable     string
 }
@@ -36,6 +37,7 @@ func loadConfig() (config, error) {
 		RelayResults:   need("RELAY_RESULTS_QUEUE"),
 		CallEvents:     need("CALL_EVENTS_QUEUE"),
 		SessionsTable:  need("SESSIONS_TABLE"),
+		NodesTable:     need("NODES_TABLE"),
 		OutboxTable:    need("OUTBOX_TABLE"),
 		ProcessedTable: need("PROCESSED_TABLE"),
 	}

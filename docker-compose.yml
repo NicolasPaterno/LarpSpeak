@@ -63,6 +63,7 @@ services:
       RELAY_RESULTS_QUEUE: relay-results
       CALL_EVENTS_QUEUE: media-relay-call-events
       SESSIONS_TABLE: relay-sessions
+      NODES_TABLE: relay-nodes
       OUTBOX_TABLE: relay-outbox
       PROCESSED_TABLE: relay-processed
 

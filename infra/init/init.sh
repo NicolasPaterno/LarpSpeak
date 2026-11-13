@@ -36,7 +36,7 @@ done
 
 # Database per service.
 for t in signaling-calls signaling-users signaling-outbox signaling-processed \
-         relay-sessions relay-outbox relay-processed audit-records audit-processed; do table "$t"; done
+         relay-sessions relay-nodes relay-outbox relay-processed audit-records audit-processed; do table "$t"; done
 
 # Object storage + secret for audio encryption.
 aws s3api head-bucket --bucket larpspeak-audio 2>/dev/null || aws s3api create-bucket --bucket larpspeak-audio >/dev/null

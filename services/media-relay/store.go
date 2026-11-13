@@ -31,8 +31,7 @@ type session struct {
 	Participants []string `dynamodbav:"participants,stringset,omitempty"`
 	State        string   `dynamodbav:"state"`
 	Reason       string   `dynamodbav:"reason,omitempty"`
-	Owner        string   `dynamodbav:"owner"`       // replica forwarding this call's audio
-	HeartbeatAt  int64    `dynamodbav:"heartbeatAt"` // unix ms, refreshed by the owner every 2s
+	Owner        string   `dynamodbav:"owner"` // relay pod forwarding this call's audio
 }
 
 type store struct {
@@ -55,56 +54,6 @@ func (s *store) getSession(ctx context.Context, callID string) (*session, error)
 	}
 	var ss session
 	return &ss, attributevalue.UnmarshalMap(out.Item, &ss)
-}
-
-// heartbeat proves this replica still owns the session. It fails if another
-// replica took it over or the session was released.
-func (s *store) heartbeat(ctx context.Context, callID, owner string, now int64) error {
-	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 &s.cfg.SessionsTable,
-		Key:                       key(callID),
-		UpdateExpression:          aws.String("SET heartbeatAt = :now"),
-		ConditionExpression:       aws.String("#s = :alloc AND #o = :me"),
-		ExpressionAttributeNames:  map[string]string{"#s": "state", "#o": "owner"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":now": num(now), ":alloc": str(stateAllocated), ":me": str(owner)},
-	})
-	var ccf *types.ConditionalCheckFailedException
-	if errors.As(err, &ccf) {
-		return errReleased
-	}
-	return err
-}
-
-// orphans lists allocated sessions whose owner stopped heartbeating. A scan is fine at demo scale.
-func (s *store) orphans(ctx context.Context, staleBefore int64) ([]session, error) {
-	out, err := s.db.Scan(ctx, &dynamodb.ScanInput{
-		TableName:                 &s.cfg.SessionsTable,
-		ConsistentRead:            aws.Bool(true),
-		FilterExpression:          aws.String("#s = :alloc AND heartbeatAt < :t"),
-		ExpressionAttributeNames:  map[string]string{"#s": "state"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{":alloc": str(stateAllocated), ":t": num(staleBefore)},
-	})
-	if err != nil {
-		return nil, err
-	}
-	var ss []session
-	return ss, attributevalue.UnmarshalListOfMaps(out.Items, &ss)
-}
-
-// takeover moves an orphaned session to this replica. The condition on the old
-// heartbeat makes sure only one replica wins and a revived owner cannot keep it.
-func (s *store) takeover(old session, owner, host string, port int, now int64) types.TransactWriteItem {
-	return types.TransactWriteItem{Update: &types.Update{
-		TableName:                &s.cfg.SessionsTable,
-		Key:                      key(old.CallID),
-		UpdateExpression:         aws.String("SET #o = :me, #h = :host, #p = :port, heartbeatAt = :now"),
-		ConditionExpression:      aws.String("#s = :alloc AND heartbeatAt = :old"),
-		ExpressionAttributeNames: map[string]string{"#s": "state", "#o": "owner", "#h": "host", "#p": "port"},
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":me": str(owner), ":host": str(host), ":port": num(int64(port)), ":now": num(now),
-			":alloc": str(stateAllocated), ":old": num(old.HeartbeatAt),
-		},
-	}}
 }
 
 // markProcessed is the R1 idempotency guard; always item 0 of a transaction.
