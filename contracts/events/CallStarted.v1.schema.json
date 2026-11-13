@@ -3,14 +3,52 @@
   "$id": "https://larpspeak.local/contracts/events/CallStarted.v1.schema.json",
   "title": "CallStarted v1",
   "description": "Fact: a call is live. Channel: SNS call-events -> media-relay, audit-vault.",
-  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "allOf": [
+    {
+      "$ref": "../envelope.schema.json"
+    }
+  ],
   "properties": {
-    "type": { "const": "CallStarted" },
-    "version": { "const": 1 },
+    "type": {
+      "const": "CallStarted"
+    },
+    "version": {
+      "const": 1
+    },
     "payload": {
       "type": "object",
-      "required": ["callId", "roomId", "kind", "relayId", "participants"],
-      "properties": { "callId": { "type": "string" }, "roomId": { "type": "string" }, "kind": { "enum": ["direct", "group"] }, "relayId": { "type": "string" }, "participants": { "type": "array", "items": { "type": "string" }, "minItems": 1 } }
+      "required": [
+        "callId",
+        "kind",
+        "capacity",
+        "relayId",
+        "participants"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "direct",
+            "group"
+          ]
+        },
+        "relayId": {
+          "type": "string"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 2
+        }
+      }
     }
   }
 }

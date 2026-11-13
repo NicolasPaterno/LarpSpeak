@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/ParticipantJoined.v1.schema.json",
+  "title": "ParticipantJoined v1",
+  "description": "Fact: a user took a seat in an active call. media-relay lets the user send audio; audit-vault records it. Channel: SNS call-events -> media-relay, audit-vault.",
+  "allOf": [
+    {
+      "$ref": "../envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "type": {
+      "const": "ParticipantJoined"
+    },
+    "version": {
+      "const": 1
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "callId",
+        "userId"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "userId": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

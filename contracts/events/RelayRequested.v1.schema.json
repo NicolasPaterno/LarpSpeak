@@ -3,14 +3,36 @@
   "$id": "https://larpspeak.local/contracts/events/RelayRequested.v1.schema.json",
   "title": "RelayRequested v1",
   "description": "Command: allocate an audio relay for a call. Channel: SQS relay-requests (call-signaling -> media-relay).",
-  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "allOf": [
+    {
+      "$ref": "../envelope.schema.json"
+    }
+  ],
   "properties": {
-    "type": { "const": "RelayRequested" },
-    "version": { "const": 1 },
+    "type": {
+      "const": "RelayRequested"
+    },
+    "version": {
+      "const": 1
+    },
     "payload": {
       "type": "object",
-      "required": ["callId", "roomId", "participants"],
-      "properties": { "callId": { "type": "string" }, "roomId": { "type": "string" }, "participants": { "type": "array", "items": { "type": "string" }, "minItems": 1 } }
+      "required": [
+        "callId",
+        "participants"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
     }
   }
 }
