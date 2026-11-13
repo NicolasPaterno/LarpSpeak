@@ -43,11 +43,19 @@ type relay struct {
 	st   *store
 	log  *slog.Logger
 	cfg  config
+	id   string // this replica (container hostname), the session "owner"
 	host string // address participants send UDP audio to
 
 	mu   sync.Mutex
 	live map[string]*liveSession // by callId
+
+	healthySince time.Time // last time a DynamoDB call failed; takeovers wait for a stable link
 }
+
+const (
+	heartbeatEvery = 2 * time.Second
+	orphanAfter    = 6 * time.Second // a session without heartbeat this long is taken over
+)
 
 type callRef struct {
 	CallID       string   `json:"callId"`
@@ -182,7 +190,8 @@ func (r *relay) allocate(ctx context.Context, e envelope, ref callRef) error {
 		return nil
 	}
 
-	ss := session{CallID: ref.CallID, RelayID: uuid.New().String(), Host: r.host, Port: r.cfg.UDPPort, Participants: ref.Participants, State: stateAllocated}
+	ss := session{CallID: ref.CallID, RelayID: uuid.New().String(), Host: r.host, Port: r.cfg.UDPPort, Participants: ref.Participants,
+		State: stateAllocated, Owner: r.id, HeartbeatAt: time.Now().UnixMilli()}
 	put, err := r.st.putSession(ss)
 	if err != nil {
 		return err
@@ -292,11 +301,12 @@ func parseHeader(p []byte) (callID, userID string, ok bool) {
 // Silence is not a timeout: muted clients keep sending packets.
 // It also drops local sessions released elsewhere and syncs participants.
 // ponytail: one GetItem per live session every 2s; fine for demo-sized load.
-// ponytail: if the owning replica dies, its participants are never timed out;
-// a heartbeat check in call-signaling would cover that.
 func (r *relay) sweep(ctx context.Context) {
+	r.healthySince = time.Now()
 	for ctx.Err() == nil {
-		time.Sleep(2 * time.Second)
+		time.Sleep(heartbeatEvery)
+		r.heartbeat(ctx)
+		r.adoptOrphans(ctx)
 		type gone struct{ callID, userID string }
 		var timedOut []gone
 		var calls []string
@@ -325,6 +335,60 @@ func (r *relay) sweep(ctx context.Context) {
 		for _, callID := range calls {
 			r.refresh(ctx, callID)
 		}
+	}
+}
+
+// heartbeat refreshes heartbeatAt on every session this replica owns. A session
+// that another replica took over (we were frozen too long) is dropped locally.
+func (r *relay) heartbeat(ctx context.Context) {
+	r.mu.Lock()
+	calls := make([]string, 0, len(r.live))
+	for id := range r.live {
+		calls = append(calls, id)
+	}
+	r.mu.Unlock()
+	now := time.Now().UnixMilli()
+	for _, callID := range calls {
+		switch err := r.st.heartbeat(ctx, callID, r.id, now); {
+		case errors.Is(err, errReleased):
+			r.log.Warn("session no longer ours, dropping", "correlationId", callID)
+			r.untrack(callID)
+		case err != nil:
+			r.healthySince = time.Now()
+		}
+	}
+}
+
+// adoptOrphans takes over sessions whose owner stopped heartbeating (replica
+// died) and announces the new address so clients move their audio here.
+func (r *relay) adoptOrphans(ctx context.Context) {
+	if time.Since(r.healthySince) < orphanAfter {
+		return // after an outage everyone looks stale: give live owners time to heartbeat first
+	}
+	orphans, err := r.st.orphans(ctx, time.Now().Add(-orphanAfter).UnixMilli())
+	if err != nil {
+		r.healthySince = time.Now()
+		return
+	}
+	for _, old := range orphans {
+		moved, err := newEnvelope("RelayMoved", old.CallID, map[string]any{
+			"callId": old.CallID, "relayId": old.RelayID, "host": r.host, "port": r.cfg.UDPPort,
+		})
+		if err != nil {
+			continue
+		}
+		out, err := r.st.outbox(r.cfg.RelayResults, moved)
+		if err != nil {
+			continue
+		}
+		// Item 0 is the takeover guard: "duplicate" here means another replica won.
+		if err := r.st.commit(ctx, r.st.takeover(old, r.id, r.host, r.cfg.UDPPort, time.Now().UnixMilli()), out); err != nil {
+			continue
+		}
+		deadOwner := old.Owner
+		old.Host, old.Port, old.Owner = r.host, r.cfg.UDPPort, r.id
+		r.track(old)
+		r.log.Warn("relay taken over from dead replica", "correlationId", old.CallID, "from", deadOwner, "host", r.host, "port", r.cfg.UDPPort)
 	}
 }
 

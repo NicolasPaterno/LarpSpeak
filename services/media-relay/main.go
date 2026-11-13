@@ -47,7 +47,7 @@ func main() {
 	}
 	st := &store{db: dynamodb.NewFromConfig(awsCfg), cfg: cfg}
 	b := &bus{sqs: sqs.NewFromConfig(awsCfg), log: log, urls: map[string]string{}}
-	r := &relay{st: st, log: log, cfg: cfg, host: advertisedHost(hostname), live: map[string]*liveSession{}}
+	r := &relay{st: st, log: log, cfg: cfg, id: hostname, host: advertisedHost(hostname), live: map[string]*liveSession{}}
 
 	go relayOutbox(ctx, st, b)
 	go b.consume(ctx, cfg.RelayRequests, r.onRelayRequest) // competing consumers across replicas (R4)
