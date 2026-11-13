@@ -106,7 +106,50 @@ func (s *store) activeInvites(ctx context.Context, user string) ([]call, error) 
 	return calls, attributevalue.UnmarshalListOfMaps(out.Items, &calls)
 }
 
+// currentCall returns the call the user is in according to signaling-users ("" if none).
+func (s *store) currentCall(ctx context.Context, user string) (string, error) {
+	out, err := s.db.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.cfg.UsersTable, Key: key(user), ConsistentRead: aws.Bool(true)})
+	if err != nil || out.Item == nil {
+		return "", err
+	}
+	v, _ := out.Item["callId"].(*types.AttributeValueMemberS)
+	if v == nil {
+		return "", nil
+	}
+	return v.Value, nil
+}
+
+// forgetUser removes the user's "current call" record if it still points to callID.
+// Best effort outside transactions: a stale record is also cleaned on the next join.
+func (s *store) forgetUser(ctx context.Context, user, callID string) {
+	_, _ = s.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &s.cfg.UsersTable, Key: key(user),
+		ConditionExpression:       aws.String("callId = :c"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":c": str(callID)},
+	})
+}
+
 // --- transaction items ---
+
+// claimUser records that the user is now in callID. It fails if the user is
+// already recorded in a call, which enforces one call per user.
+func (s *store) claimUser(user, callID string) types.TransactWriteItem {
+	return types.TransactWriteItem{Put: &types.Put{
+		TableName:           &s.cfg.UsersTable,
+		Item:                map[string]types.AttributeValue{"pk": str(user), "callId": str(callID)},
+		ConditionExpression: aws.String("attribute_not_exists(pk)"),
+	}}
+}
+
+// releaseUser deletes the record if it points to callID (or is already gone).
+func (s *store) releaseUser(user, callID string) types.TransactWriteItem {
+	return types.TransactWriteItem{Delete: &types.Delete{
+		TableName:                 &s.cfg.UsersTable,
+		Key:                       key(user),
+		ConditionExpression:       aws.String("attribute_not_exists(pk) OR callId = :c"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":c": str(callID)},
+	}}
+}
 
 // join is the R2 concurrency control: one atomic conditional update takes a seat
 // only while the call is active, not full, and the user is not already inside.

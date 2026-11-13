@@ -45,8 +45,34 @@ func (sg *saga) start(ctx context.Context, c call) error {
 	if err != nil {
 		return err
 	}
-	_, err = sg.st.commit(ctx, put, out)
+	if err := sg.moveOut(ctx, c.CallerID, c.ID); err != nil {
+		return err
+	}
+	codes, err := sg.st.commit(ctx, put, out, sg.st.claimUser(c.CallerID, c.ID))
+	if conditionFailed(codes, 2) {
+		return errStateChanged // the creator joined another call at the same moment
+	}
 	return err
+}
+
+// moveOut makes a user leave whatever call they are in before entering target,
+// like Discord does when you join another voice channel. Stale records (call
+// already over, or user no longer inside) are just cleaned up.
+func (sg *saga) moveOut(ctx context.Context, user, target string) error {
+	prev, err := sg.st.currentCall(ctx, user)
+	if err != nil || prev == "" || prev == target {
+		return err
+	}
+	switch err := sg.leave(ctx, prev, user); err {
+	case nil:
+		sg.log.Info("participant moved", "userId", user, "from", prev, "to", target)
+		sg.hub.notify(user, "left_call", map[string]string{"callId": prev, "reason": "joined another call"})
+	case errNotActive, errNotIn:
+		sg.st.forgetUser(ctx, user, prev)
+	default:
+		return err
+	}
+	return nil
 }
 
 // onRelayResult handles RelayAllocated / RelayFailed / RelayClosed from media-relay.
@@ -137,6 +163,7 @@ func (sg *saga) compensate(ctx context.Context, c *call, reason string, extra ..
 		return err
 	}
 	sg.log.Warn("call compensated", "correlationId", c.ID, "reason", reason, "seatsReleased", c.Taken)
+	sg.st.forgetUser(ctx, c.CallerID, c.ID)
 	sg.hub.notify(c.CallerID, "call_failed", map[string]string{"callId": c.ID, "reason": reason})
 	return nil
 }
@@ -151,9 +178,22 @@ func (sg *saga) join(ctx context.Context, id, user string) (*call, error) {
 	if err != nil {
 		return nil, err
 	}
-	codes, err := sg.st.commit(ctx, sg.st.join(id, user), out)
-	if conditionFailed(codes, 0) {
-		return nil, sg.whyRejected(ctx, id, user)
+	// Check the target first, so a full or finished call does not kick the user out of their current one.
+	if err := sg.canJoin(ctx, id, user); err != nil {
+		return nil, err
+	}
+	if err := sg.moveOut(ctx, user, id); err != nil {
+		return nil, err
+	}
+	codes, err := sg.st.commit(ctx, sg.st.join(id, user), out, sg.st.claimUser(user, id))
+	if conditionFailed(codes, 0) { // lost a race for the last seat (or the call just ended)
+		if err := sg.canJoin(ctx, id, user); err != nil {
+			return nil, err
+		}
+		return nil, errRoomFull
+	}
+	if conditionFailed(codes, 2) {
+		return nil, errStateChanged // the same user joined another call at the same moment
 	}
 	if err != nil {
 		return nil, err
@@ -167,8 +207,8 @@ func (sg *saga) join(ctx context.Context, id, user string) (*call, error) {
 	return c, nil
 }
 
-// whyRejected re-reads the call to tell the client why its join failed.
-func (sg *saga) whyRejected(ctx context.Context, id, user string) error {
+// canJoin says whether user could join call id right now.
+func (sg *saga) canJoin(ctx context.Context, id, user string) error {
 	c, err := sg.st.getCall(ctx, id)
 	switch {
 	case err != nil:
@@ -177,9 +217,10 @@ func (sg *saga) whyRejected(ctx context.Context, id, user string) error {
 		return errNotActive
 	case c.has(user):
 		return errAlreadyIn
-	default:
+	case c.Taken >= c.Capacity:
 		return errRoomFull
 	}
+	return nil
 }
 
 // leave frees the user's seat; the last one out ends the call. Retries when
@@ -201,7 +242,7 @@ func (sg *saga) leave(ctx context.Context, id, user string) error {
 		if err != nil {
 			return err
 		}
-		items := []types.TransactWriteItem{sg.st.leave(id, user, c.Taken, last, now)}
+		items := []types.TransactWriteItem{sg.st.leave(id, user, c.Taken, last, now), sg.st.releaseUser(user, id)}
 		out, err := sg.st.outbox(destTopic, left)
 		if err != nil {
 			return err
@@ -261,7 +302,12 @@ func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.
 		return err
 	}
 	sg.log.Info("call ended", "correlationId", c.ID, "reason", reason)
+	// Re-read after the commit: someone may have joined between our read and the end.
+	if final, err := sg.st.getCall(ctx, c.ID); err == nil && final != nil {
+		c = final
+	}
 	for _, u := range c.Participants {
+		sg.st.forgetUser(ctx, u, c.ID)
 		sg.hub.notify(u, "call_ended", map[string]string{"callId": c.ID, "reason": reason})
 	}
 	return nil

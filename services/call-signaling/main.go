@@ -176,6 +176,9 @@ func (sg *saga) handleGet(w http.ResponseWriter, r *http.Request) {
 	case c == nil:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "call not found"})
 	default:
+		if c.Participants == nil {
+			c.Participants = []string{} // DynamoDB drops empty sets; clients expect a list
+		}
 		writeJSON(w, http.StatusOK, c)
 	}
 }

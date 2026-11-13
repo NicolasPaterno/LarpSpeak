@@ -43,6 +43,7 @@ services:
       RELAY_REQUESTS_QUEUE: relay-requests
       RELAY_RESULTS_QUEUE: relay-results
       CALLS_TABLE: signaling-calls
+      USERS_TABLE: signaling-users
       OUTBOX_TABLE: signaling-outbox
       PROCESSED_TABLE: signaling-processed
 
