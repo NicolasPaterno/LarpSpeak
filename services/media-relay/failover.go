@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -81,7 +82,7 @@ func (r *relay) watchNodes(ctx context.Context, seen map[string]pingSeen) {
 		switch {
 		case n.ID == r.id:
 		case n.Status == nodeAlive && time.Since(seen[n.ID].at) > deadAfter:
-			if answersHealth(n.Addr) { // second opinion: pings stopped but the pod is serving
+			if answersHealth(n.Addr, n.ID) { // second opinion: pings stopped but the pod is serving
 				r.log.Warn("relay pod missed pings but answers health checks: no failover", "pod", n.ID)
 				seen[n.ID] = pingSeen{n.Beat, time.Now()} // ask again after another deadAfter
 				continue
@@ -101,8 +102,10 @@ func (r *relay) watchNodes(ctx context.Context, seen map[string]pingSeen) {
 
 var probe = &http.Client{Timeout: 500 * time.Millisecond}
 
-// answersHealth calls the suspect pod directly. A dead or frozen pod does not answer.
-func answersHealth(addr string) bool {
+// answersHealth calls the suspect pod directly. A dead or frozen pod does not
+// answer. The reply must name the suspect: a replacement pod can reuse a dead
+// pod's IP address, and its answer must not keep the dead pod "alive".
+func answersHealth(addr, id string) bool {
 	if addr == "" {
 		return false
 	}
@@ -110,8 +113,11 @@ func answersHealth(addr string) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	defer resp.Body.Close()
+	var h struct {
+		Replica string `json:"replica"`
+	}
+	return resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&h) == nil && h.Replica == id
 }
 
 // checkLink records an unhealthy link when a DynamoDB call failed OR was slow.
