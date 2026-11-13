@@ -56,7 +56,6 @@ func main() {
 	})
 	mux.HandleFunc("POST /calls", sg.handleCreate)
 	mux.HandleFunc("GET /calls/{id}", sg.handleGet)
-	mux.HandleFunc("POST /calls/{id}/end", sg.handleEnd)
 	mux.HandleFunc("POST /calls/{id}/join", sg.handleJoin)
 	mux.HandleFunc("POST /calls/{id}/leave", sg.handleLeave)
 	mux.HandleFunc("GET /users/{userId}/notifications", h.serve)
@@ -181,23 +180,6 @@ func (sg *saga) handleGet(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, c)
 	}
-}
-
-func (sg *saga) handleEnd(w http.ResponseWriter, r *http.Request) {
-	c, err := sg.st.getCall(r.Context(), r.PathValue("id"))
-	if err != nil || c == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "call not found"})
-		return
-	}
-	if c.Status != statusActive {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "call is " + c.Status})
-		return
-	}
-	if err := sg.end(r.Context(), c, "hangup"); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "call state changed, retry"})
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"callId": c.ID, "status": statusEnded})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

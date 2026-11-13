@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -25,6 +26,7 @@ type saga struct {
 
 type relayResult struct {
 	CallID  string `json:"callId"`
+	UserID  string `json:"userId"`
 	RelayID string `json:"relayId"`
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
@@ -75,7 +77,7 @@ func (sg *saga) moveOut(ctx context.Context, user, target string) error {
 	return nil
 }
 
-// onRelayResult handles RelayAllocated / RelayFailed / RelayClosed from media-relay.
+// onRelayResult handles RelayAllocated / RelayFailed / ParticipantTimedOut from media-relay.
 func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	var r relayResult
 	if err := json.Unmarshal(e.Payload, &r); err != nil || r.CallID == "" {
@@ -94,9 +96,17 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 	case e.Type == "RelayFailed" && c.Status == statusPending:
 		return sg.compensate(ctx, c, "relay failed: "+r.Reason, dedupe)
 
-	case e.Type == "RelayClosed" && c.Status == statusActive:
-		// media-relay saw no audio for too long: end the abandoned call.
-		return sg.end(ctx, c, "relay "+r.Reason, dedupe)
+	case e.Type == "ParticipantTimedOut":
+		// The user's client stopped sending packets (crash, lost network): remove
+		// them like a normal leave. Only the last one out ends the call.
+		err := sg.leave(ctx, c.ID, r.UserID, dedupe)
+		if errors.Is(err, errNotActive) || errors.Is(err, errNotIn) { // already gone
+			return sg.commitOnce(ctx, dedupe)
+		}
+		if err == nil {
+			sg.hub.notify(r.UserID, "left_call", map[string]string{"callId": c.ID, "reason": "connection lost"})
+		}
+		return err
 
 	case e.Type == "RelayAllocated" && c.Status == statusPending:
 		now := sg.nowFn().UnixMilli()
@@ -134,7 +144,7 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 		sg.log.Warn("late relay released", "correlationId", c.ID, "status", c.Status, "relayId", r.RelayID)
 		return sg.commitOnce(ctx, dedupe, out)
 
-	default: // RelayFailed/RelayClosed for a call already past that state: nothing to do.
+	default: // RelayFailed for a call already past PENDING: nothing to do.
 		return sg.commitOnce(ctx, dedupe)
 	}
 }
@@ -223,9 +233,10 @@ func (sg *saga) canJoin(ctx context.Context, id, user string) error {
 	return nil
 }
 
-// leave frees the user's seat; the last one out ends the call. Retries when
-// someone else joined/left between our read and our write.
-func (sg *saga) leave(ctx context.Context, id, user string) error {
+// leave frees the user's seat; the last one out ends the call (the only way a
+// call ends). Retries when someone else joined/left between our read and our
+// write. extra items (a dedupe marker) go first in the transaction.
+func (sg *saga) leave(ctx context.Context, id, user string, extra ...types.TransactWriteItem) error {
 	for range 3 {
 		c, err := sg.st.getCall(ctx, id)
 		switch {
@@ -242,7 +253,7 @@ func (sg *saga) leave(ctx context.Context, id, user string) error {
 		if err != nil {
 			return err
 		}
-		items := []types.TransactWriteItem{sg.st.leave(id, user, c.Taken, last, now), sg.st.releaseUser(user, id)}
+		items := append(slices.Clone(extra), sg.st.leave(id, user, c.Taken, last, now), sg.st.releaseUser(user, id))
 		out, err := sg.st.outbox(destTopic, left)
 		if err != nil {
 			return err
@@ -261,7 +272,10 @@ func (sg *saga) leave(ctx context.Context, id, user string) error {
 			items = append(items, out)
 		}
 		codes, err := sg.st.commit(ctx, items...)
-		if conditionFailed(codes, 0) {
+		if len(extra) > 0 && conditionFailed(codes, 0) {
+			return errDuplicate
+		}
+		if conditionFailed(codes, len(extra)) {
 			continue // counter moved under us: read again
 		}
 		if err != nil {
@@ -270,47 +284,12 @@ func (sg *saga) leave(ctx context.Context, id, user string) error {
 		sg.log.Info("participant left", "correlationId", id, "userId", user, "callEnded", last)
 		c.Participants = slices.DeleteFunc(c.Participants, func(p string) bool { return p == user })
 		sg.broadcast(c, user, "participant_left")
+		if last {
+			sg.log.Info("call ended", "correlationId", id, "reason", "everyone left")
+		}
 		return nil
 	}
 	return errStateChanged
-}
-
-// end finishes an active call for everyone (hang-up or idle relay) and publishes
-// CallEnded, consumed by media-relay and audit-vault. extra items (dedupe) go first.
-func (sg *saga) end(ctx context.Context, c *call, reason string, extra ...types.TransactWriteItem) error {
-	now := sg.nowFn().UnixMilli()
-	ended, err := newEnvelope("CallEnded", c.ID, map[string]any{
-		"callId": c.ID, "relayId": c.RelayID, "durationMs": now - c.StartedAt, "reason": reason,
-	})
-	if err != nil {
-		return err
-	}
-	out, err := sg.st.outbox(destTopic, ended)
-	if err != nil {
-		return err
-	}
-	fields := map[string]types.AttributeValue{"endedAt": num(now), "reason": str(reason), "taken": num(0)}
-	items := append(extra, sg.st.transition(c.ID, statusActive, statusEnded, fields), out)
-	codes, err := sg.st.commit(ctx, items...)
-	if len(extra) > 0 && conditionFailed(codes, 0) {
-		return errDuplicate
-	}
-	if conditionFailed(codes, len(extra)) {
-		return errStateChanged
-	}
-	if err != nil {
-		return err
-	}
-	sg.log.Info("call ended", "correlationId", c.ID, "reason", reason)
-	// Re-read after the commit: someone may have joined between our read and the end.
-	if final, err := sg.st.getCall(ctx, c.ID); err == nil && final != nil {
-		c = final
-	}
-	for _, u := range c.Participants {
-		sg.st.forgetUser(ctx, u, c.ID)
-		sg.hub.notify(u, "call_ended", map[string]string{"callId": c.ID, "reason": reason})
-	}
-	return nil
 }
 
 // replayInvites resends invitations the user missed while not connected:
