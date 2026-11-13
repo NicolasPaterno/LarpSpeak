@@ -1,4 +1,5 @@
-package main
+// Package sse pushes user notifications over Server-Sent Events.
+package sse
 
 import (
 	"context"
@@ -8,17 +9,17 @@ import (
 	"sync"
 )
 
-// hub pushes notifications ("you're being called", call active/failed) to
+// Hub pushes notifications ("you're being called", call active/failed) to
 // connected users over Server-Sent Events. In-memory: one call-signaling instance.
-type hub struct {
+type Hub struct {
 	mu     sync.Mutex
 	subs   map[string]map[chan []byte]struct{}
-	replay func(ctx context.Context, userID string) // resends what a newly connected user missed
+	Replay func(ctx context.Context, userID string) // resends what a newly connected user missed
 }
 
-func newHub() *hub { return &hub{subs: map[string]map[chan []byte]struct{}{}} }
+func New() *Hub { return &Hub{subs: map[string]map[chan []byte]struct{}{}} }
 
-func (h *hub) notify(userID, event string, data any) {
+func (h *Hub) Notify(userID, event string, data any) {
 	msg, _ := json.Marshal(data)
 	frame := []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event, msg))
 	h.mu.Lock()
@@ -31,8 +32,8 @@ func (h *hub) notify(userID, event string, data any) {
 	}
 }
 
-// serve streams a user's notifications: GET /users/{userId}/notifications.
-func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
+// Serve streams a user's notifications: GET /users/{userId}/notifications.
+func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
 	userID := r.PathValue("userId")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -46,8 +47,8 @@ func (h *hub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	h.subs[userID][ch] = struct{}{}
 	h.mu.Unlock()
-	if h.replay != nil {
-		go h.replay(r.Context(), userID)
+	if h.Replay != nil {
+		go h.Replay(r.Context(), userID)
 	}
 	defer func() {
 		h.mu.Lock()

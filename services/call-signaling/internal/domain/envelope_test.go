@@ -1,10 +1,10 @@
-package main
+package domain
 
 import "testing"
 
 func TestParseEnvelope(t *testing.T) {
 	valid := `{"messageId":"m1","correlationId":"c1","type":"RelayFailed","version":1,"occurredAt":"2026-11-13T10:00:00Z","payload":{"callId":"c1"}}`
-	if _, err := parseEnvelope(valid); err != nil {
+	if _, err := ParseEnvelope(valid); err != nil {
 		t.Fatalf("valid envelope rejected: %v", err)
 	}
 	poison := map[string]string{
@@ -15,7 +15,7 @@ func TestParseEnvelope(t *testing.T) {
 		"missing payload": `{"messageId":"m1","correlationId":"c1","type":"T","version":1,"occurredAt":"2026-11-13T10:00:00Z"}`,
 	}
 	for name, body := range poison {
-		if _, err := parseEnvelope(body); err == nil {
+		if _, err := ParseEnvelope(body); err == nil {
 			t.Errorf("%s: accepted, want rejection", name)
 		}
 	}
