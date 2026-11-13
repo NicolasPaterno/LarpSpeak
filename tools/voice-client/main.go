@@ -6,6 +6,10 @@
 //	voice-client -user ana -create -max 5 -invite bob,carl   # create a call
 //	voice-client -user bob -join <callId>                    # join a call
 //	voice-client -user carl -listen                          # join when invited
+//
+// Testing alone on one computer: run a second client with -mute in another
+// terminal; it only plays what it receives, so you hear yourself with the
+// call's real delay. Add -loss 0.1 to hear the packet-loss recovery.
 package main
 
 import (
@@ -18,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -45,6 +50,8 @@ func main() {
 	join := flag.String("join", "", "call id to join")
 	listen := flag.Bool("listen", false, "wait for an invitation and join it")
 	relay := flag.String("relay", "", "override relay host (if the server reports an address you cannot reach)")
+	mute := flag.Bool("mute", false, "send silence instead of the microphone (one-computer testing)")
+	loss := flag.Float64("loss", 0, "drop this fraction of received packets on purpose (e.g. 0.1)")
 	flag.Parse()
 	if *user == "" || (!*create && *join == "" && !*listen) {
 		flag.Usage()
@@ -85,7 +92,7 @@ func main() {
 		info.RelayHost = *relay
 	}
 	log.Printf("in call %s via relay %s:%d - talk! (Ctrl+C to leave)", info.CallID, info.RelayHost, info.RelayPort)
-	err = talk(ctx, info, *user)
+	err = talk(ctx, info, *user, *mute, *loss)
 	if lerr := api.leave(info.CallID); lerr != nil {
 		log.Printf("leave: %v", lerr)
 	}
@@ -96,7 +103,7 @@ func main() {
 }
 
 // talk runs full duplex audio: mic -> UDP and UDP -> jitter buffers -> mixer -> speakers.
-func talk(ctx context.Context, info callInfo, user string) error {
+func talk(ctx context.Context, info callInfo, user string, mute bool, loss float64) error {
 	conn, err := net.Dial("udp", net.JoinHostPort(info.RelayHost, strconv.Itoa(info.RelayPort)))
 	if err != nil {
 		return err
@@ -104,17 +111,21 @@ func talk(ctx context.Context, info callInfo, user string) error {
 	defer conn.Close()
 
 	pcm := []string{"-q", "--buffer", strconv.Itoa(frameBytes), "-t", "raw", "-r", strconv.Itoa(sampleRate), "-e", "signed-integer", "-b", "16", "-c", "1"}
-	rec := exec.CommandContext(ctx, "sox", append(append([]string{"-d"}, pcm...), "-")...)
 	play := exec.CommandContext(ctx, "sox", append(append([]string{}, pcm...), "-", "-d")...)
-	mic, err := rec.StdoutPipe()
-	if err != nil {
-		return err
-	}
 	speaker, err := play.StdinPipe()
 	if err != nil {
 		return err
 	}
-	for _, c := range []*exec.Cmd{rec, play} {
+	cmds := []*exec.Cmd{play}
+	var mic io.Reader = silence{}
+	if !mute {
+		rec := exec.CommandContext(ctx, "sox", append(append([]string{"-d"}, pcm...), "-")...)
+		if mic, err = rec.StdoutPipe(); err != nil {
+			return err
+		}
+		cmds = append(cmds, rec)
+	}
+	for _, c := range cmds {
 		if err := c.Start(); err != nil {
 			return fmt.Errorf("starting sox (is it installed?): %w", err)
 		}
@@ -123,7 +134,7 @@ func talk(ctx context.Context, info callInfo, user string) error {
 	m := newMixer()
 	errs := make(chan error, 3)
 	go func() { errs <- send(conn, mic, info.CallID, user) }()
-	go func() { errs <- receive(conn, m, info.CallID) }()
+	go func() { errs <- receive(conn, m, info.CallID, loss) }()
 	go func() { errs <- playout(ctx, m, speaker) }()
 	go reportStats(ctx, m)
 
@@ -152,7 +163,16 @@ func send(conn net.Conn, mic io.Reader, callID, user string) error {
 	}
 }
 
-func receive(conn net.Conn, m *mixer, callID string) error {
+// silence stands in for the microphone with -mute: 20 ms of zeros every 20 ms.
+type silence struct{}
+
+func (silence) Read(p []byte) (int, error) {
+	time.Sleep(frameDuration)
+	clear(p)
+	return len(p), nil
+}
+
+func receive(conn net.Conn, m *mixer, callID string, loss float64) error {
 	buf := make([]byte, 64*1024)
 	for {
 		n, err := conn.Read(buf)
@@ -162,6 +182,9 @@ func receive(conn net.Conn, m *mixer, callID string) error {
 				continue // relay not reachable yet / ICMP noise
 			}
 			return err
+		}
+		if rand.Float64() < loss {
+			continue // simulated network loss
 		}
 		head, payload, ok := bytes.Cut(buf[:n], []byte("\n"))
 		f := strings.Fields(string(head))
