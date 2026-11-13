@@ -1,11 +1,11 @@
 package main
 
 import (
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 )
 
 // envelope is the shared message format defined in contracts/envelope.schema.json.
@@ -24,7 +24,7 @@ func newEnvelope(typ, correlationID string, payload any) (envelope, error) {
 		return envelope{}, err
 	}
 	return envelope{
-		MessageID:     newID(),
+		MessageID:     uuid.New().String(),
 		CorrelationID: correlationID,
 		Type:          typ,
 		Version:       1,
@@ -49,13 +49,4 @@ func parseEnvelope(body string) (envelope, error) {
 		return e, errors.New("payload must be an object")
 	}
 	return e, nil
-}
-
-// newID returns a random UUID v4.
-func newID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }

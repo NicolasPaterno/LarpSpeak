@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"uuid"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -79,7 +80,7 @@ func (sg *saga) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := call{
-		ID: newID(), CallerID: req.CallerID, Status: statusPending, CreatedAt: sg.nowFn().UnixMilli(),
+		ID: uuid.New().String(), CallerID: req.CallerID, Status: statusPending, CreatedAt: sg.nowFn().UnixMilli(),
 		Participants: append([]string{req.CallerID}, req.CalleeIDs...),
 	}
 	c.Seats = len(c.Participants)
