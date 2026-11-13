@@ -7,7 +7,14 @@
 //	voice-client -user bob -join <callId>                    # join a call
 //	voice-client -user carl -listen                          # join when invited
 //
-// Testing alone on one computer: run a second client with -mute in another
+// In a call, type a command and press Enter:
+//
+//	m          mute / unmute the microphone      (or: kill -USR1 <pid>)
+//	d          deafen / undeafen (also mutes)    (or: kill -USR2 <pid>)
+//	i <user>   invite someone into this call
+//	q          leave the call
+//
+// Testing alone on one computer: run a second client with -nomic in another
 // terminal; it only plays what it receives, so you hear yourself with the
 // call's real delay. Add -loss 0.1 to hear the packet-loss recovery.
 package main
@@ -31,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -51,7 +59,9 @@ func main() {
 	join := flag.String("join", "", "call id to join")
 	listen := flag.Bool("listen", false, "wait for an invitation and join it")
 	relay := flag.String("relay", "", "override relay host (if the server reports an address you cannot reach)")
-	mute := flag.Bool("mute", false, "send silence instead of the microphone (one-computer testing)")
+	noMic := flag.Bool("nomic", false, "never open the microphone, only listen (one-computer testing)")
+	mute := flag.Bool("mute", false, "start muted")
+	deafen := flag.Bool("deafen", false, "start deafened: hear nothing and send silence")
 	loss := flag.Float64("loss", 0, "drop this fraction of received packets on purpose (e.g. 0.1)")
 	flag.Parse()
 	if *user == "" || (!*create && *join == "" && !*listen) {
@@ -59,6 +69,7 @@ func main() {
 		os.Exit(2)
 	}
 	log.SetFlags(log.Ltime)
+	signal.Ignore(syscall.SIGUSR1, syscall.SIGUSR2) // mute/deafen toggles before joining must not kill us
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -94,8 +105,12 @@ func main() {
 	if *relay != "" {
 		info.RelayHost = *relay
 	}
-	log.Printf("in call %s via relay %s:%d - talk! (Ctrl+C to leave)", info.CallID, info.RelayHost, info.RelayPort)
+	log.Printf("in call %s via relay %s:%d - talk! (m=mute d=deafen i <user>=invite q=leave)", info.CallID, info.RelayHost, info.RelayPort)
 	callCtx, hangUp := context.WithCancel(ctx)
+	var st state
+	st.muted.Store(*mute || *noMic)
+	st.deafened.Store(*deafen)
+	go controls(callCtx, &st, api, info.CallID, *noMic, hangUp)
 	var removed atomic.Bool
 	go func() {
 		for id := range gone {
@@ -129,7 +144,7 @@ func main() {
 			}
 		}
 	}()
-	err = talk(callCtx, info, &target, *user, *mute, *loss)
+	err = talk(callCtx, info, &target, *user, *noMic, *loss, &st)
 	hangUp()
 	if !removed.Load() {
 		if lerr := api.leave(info.CallID); lerr != nil {
@@ -145,7 +160,7 @@ func main() {
 // talk runs full duplex audio: mic -> UDP and UDP -> jitter buffers -> mixer -> speakers.
 // The relay address can change mid-call (failover), so the socket is not
 // connected to one address: every packet goes to whatever target holds now.
-func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr], user string, mute bool, loss float64) error {
+func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr], user string, noMic bool, loss float64, st *state) error {
 	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return err
@@ -160,7 +175,7 @@ func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr
 	}
 	cmds := []*exec.Cmd{play}
 	var mic io.Reader = silence{}
-	if !mute {
+	if !noMic {
 		rec := exec.CommandContext(ctx, "sox", append(append([]string{"-d"}, pcm...), "-")...)
 		if mic, err = rec.StdoutPipe(); err != nil {
 			return err
@@ -175,9 +190,9 @@ func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr
 
 	m := newMixer()
 	errs := make(chan error, 3)
-	go func() { errs <- send(conn, target, mic, info.CallID, user) }()
+	go func() { errs <- send(conn, target, mic, info.CallID, user, st) }()
 	go func() { errs <- receive(conn, m, info.CallID, loss) }()
-	go func() { errs <- playout(ctx, m, speaker) }()
+	go func() { errs <- playout(ctx, m, speaker, st) }()
 	go reportStats(ctx, m)
 
 	select {
@@ -190,11 +205,16 @@ func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr
 
 // send reads 20 ms of mic audio at a time. Each packet carries the current
 // frame plus the previous one, so the receiver can rebuild a single lost packet.
-func send(conn *net.UDPConn, target *atomic.Pointer[net.UDPAddr], mic io.Reader, callID, user string) error {
+// Muted clients keep sending silent packets: the relay counts packets, not
+// voice, to tell a muted participant from a crashed one.
+func send(conn *net.UDPConn, target *atomic.Pointer[net.UDPAddr], mic io.Reader, callID, user string, st *state) error {
 	cur, prev := make([]byte, frameBytes), make([]byte, frameBytes)
 	for seq := uint32(1); ; seq++ {
 		if _, err := io.ReadFull(mic, cur); err != nil {
 			return fmt.Errorf("mic: %w", err)
+		}
+		if st.muted.Load() || st.deafened.Load() {
+			clear(cur)
 		}
 		pkt := fmt.Appendf(nil, "%s %s %d\n", callID, user, seq)
 		pkt = append(append(pkt, cur...), prev...)
@@ -205,7 +225,7 @@ func send(conn *net.UDPConn, target *atomic.Pointer[net.UDPAddr], mic io.Reader,
 	}
 }
 
-// silence stands in for the microphone with -mute: 20 ms of zeros every 20 ms.
+// silence stands in for the microphone with -nomic: 20 ms of zeros every 20 ms.
 type silence struct{}
 
 func (silence) Read(p []byte) (int, error) {
@@ -245,7 +265,7 @@ func receive(conn *net.UDPConn, m *mixer, callID string, loss float64) error {
 	}
 }
 
-func playout(ctx context.Context, m *mixer, speaker io.Writer) error {
+func playout(ctx context.Context, m *mixer, speaker io.Writer, st *state) error {
 	t := time.NewTicker(frameDuration)
 	defer t.Stop()
 	for {
@@ -253,7 +273,11 @@ func playout(ctx context.Context, m *mixer, speaker io.Writer) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case now := <-t.C:
-			if _, err := speaker.Write(m.tick(now)); err != nil {
+			out := m.tick(now) // keep draining the jitter buffers while deafened
+			if st.deafened.Load() {
+				clear(out)
+			}
+			if _, err := speaker.Write(out); err != nil {
 				return fmt.Errorf("speaker: %w", err)
 			}
 		}
@@ -273,6 +297,65 @@ func reportStats(ctx context.Context, m *mixer) {
 			m.mu.Unlock()
 			log.Printf("audio: %d speakers | packets %d | late %d | recovered %d | concealed %d | lost %d",
 				speakers, s.received, s.late, s.recovered, s.concealed, s.lost)
+		}
+	}
+}
+
+// state is what the user toggles mid-call.
+type state struct{ muted, deafened atomic.Bool }
+
+// controls reads commands from the terminal and toggle signals from other
+// processes (make mute / make deafen send SIGUSR1 / SIGUSR2).
+func controls(ctx context.Context, st *state, api *client, callID string, noMic bool, hangUp func()) {
+	toggleMute := func() {
+		if noMic {
+			log.Print("no microphone (-nomic): always muted")
+			return
+		}
+		log.Printf("muted: %v", !st.muted.Load())
+		st.muted.Store(!st.muted.Load())
+	}
+	toggleDeafen := func() {
+		log.Printf("deafened: %v", !st.deafened.Load())
+		st.deafened.Store(!st.deafened.Load())
+	}
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGUSR1, syscall.SIGUSR2)
+	go func() {
+		defer signal.Stop(sig)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case s := <-sig:
+				if s == syscall.SIGUSR1 {
+					toggleMute()
+				} else {
+					toggleDeafen()
+				}
+			}
+		}
+	}()
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		switch {
+		case len(f) == 0:
+		case f[0] == "m":
+			toggleMute()
+		case f[0] == "d":
+			toggleDeafen()
+		case f[0] == "i" && len(f) == 2:
+			if err := api.invite(callID, f[1]); err != nil {
+				log.Printf("invite: %v", err)
+			} else {
+				log.Printf("invited %s", f[1])
+			}
+		case f[0] == "q":
+			hangUp()
+			return
+		default:
+			log.Print("commands: m (mute) | d (deafen) | i <user> (invite) | q (leave)")
 		}
 	}
 }
@@ -335,6 +418,13 @@ func (c *client) join(ctx context.Context, callID string) (callInfo, error) {
 	var info callInfo
 	_, err := c.do(ctx, "POST", "/calls/"+callID+"/join", map[string]string{"userId": c.user}, &info)
 	return info, err
+}
+
+func (c *client) invite(callID, user string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := c.do(ctx, "POST", "/calls/"+callID+"/invite", map[string]string{"userId": c.user, "inviteeId": user}, nil)
+	return err
 }
 
 func (c *client) leave(callID string) error {
