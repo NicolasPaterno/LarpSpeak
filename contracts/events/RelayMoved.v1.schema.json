@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/RelayMoved.v1.schema.json",
+  "title": "RelayMoved v1",
+  "description": "Fact: the media-relay replica owning a call stopped heartbeating and another replica adopted the call; clients must send audio to the new address. Channel: SQS relay-results (media-relay -> call-signaling).",
+  "allOf": [
+    {
+      "$ref": "../envelope.schema.json"
+    }
+  ],
+  "properties": {
+    "type": {
+      "const": "RelayMoved"
+    },
+    "version": {
+      "const": 1
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "callId",
+        "relayId",
+        "host",
+        "port"
+      ],
+      "properties": {
+        "callId": {
+          "type": "string"
+        },
+        "relayId": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}
