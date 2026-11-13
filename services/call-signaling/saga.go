@@ -153,8 +153,11 @@ func (sg *saga) onRelayResult(ctx context.Context, e envelope) error {
 		if err != nil {
 			return err
 		}
+		if err := sg.commitOnce(ctx, dedupe, out); err != nil {
+			return err
+		}
 		sg.log.Warn("late relay released", "correlationId", c.ID, "status", c.Status, "relayId", r.RelayID)
-		return sg.commitOnce(ctx, dedupe, out)
+		return nil
 
 	default: // RelayFailed/RelayMoved for a call no longer in that state: nothing to do.
 		return sg.commitOnce(ctx, dedupe)
