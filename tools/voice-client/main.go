@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,7 +64,8 @@ func main() {
 
 	api := &client{base: strings.TrimRight(*server, "/"), user: *user}
 	invites := make(chan string, 1)
-	go api.notifications(ctx, invites)
+	gone := make(chan string, 4) // call ids we were removed from (ended, failed, moved)
+	go api.notifications(ctx, invites, gone)
 
 	var info callInfo
 	var err error
@@ -92,9 +94,23 @@ func main() {
 		info.RelayHost = *relay
 	}
 	log.Printf("in call %s via relay %s:%d - talk! (Ctrl+C to leave)", info.CallID, info.RelayHost, info.RelayPort)
-	err = talk(ctx, info, *user, *mute, *loss)
-	if lerr := api.leave(info.CallID); lerr != nil {
-		log.Printf("leave: %v", lerr)
+	callCtx, hangUp := context.WithCancel(ctx)
+	var removed atomic.Bool
+	go func() {
+		for id := range gone {
+			if id == info.CallID {
+				removed.Store(true)
+				hangUp()
+				return
+			}
+		}
+	}()
+	err = talk(callCtx, info, *user, *mute, *loss)
+	hangUp()
+	if !removed.Load() {
+		if lerr := api.leave(info.CallID); lerr != nil {
+			log.Printf("leave: %v", lerr)
+		}
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatal(err)
@@ -272,10 +288,11 @@ func (c *client) create(ctx context.Context, invited []string, maxP int) (callIn
 		return info, err
 	}
 	log.Printf("call %s requested, waiting for a relay...", info.CallID)
-	for range 75 { // ~15 s
+	for range 75 { // ~15 s; the server fails the call itself if no relay answers in time
 		time.Sleep(200 * time.Millisecond)
 		if _, err := c.do(ctx, "GET", "/calls/"+info.CallID, nil, &info); err != nil {
-			return info, err
+			log.Printf("status check failed, retrying: %v", err)
+			continue
 		}
 		switch info.Status {
 		case "ACTIVE":
@@ -302,7 +319,7 @@ func (c *client) leave(callID string) error {
 }
 
 // notifications prints the user's SSE events and forwards invitations.
-func (c *client) notifications(ctx context.Context, invites chan<- string) {
+func (c *client) notifications(ctx context.Context, invites, gone chan<- string) {
 	for ctx.Err() == nil {
 		req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/users/"+c.user+"/notifications", nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -334,8 +351,12 @@ func (c *client) notifications(ctx context.Context, invites chan<- string) {
 					}
 				case "participant_joined", "participant_left":
 					log.Printf("%s %s", d.UserID, strings.TrimPrefix(event, "participant_"))
-				case "call_ended", "call_failed":
-					log.Printf("call %s: %s", strings.TrimPrefix(event, "call_"), d.Reason)
+				case "call_ended", "call_failed", "left_call":
+					log.Printf("%s %s: %s", strings.ReplaceAll(event, "_", " "), d.CallID, d.Reason)
+					select {
+					case gone <- d.CallID:
+					default:
+					}
 				}
 			}
 		}
