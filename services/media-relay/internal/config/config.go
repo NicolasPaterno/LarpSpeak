@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-type config struct {
+type Config struct {
 	Port               string
 	UDPPort            int
 	Latency            time.Duration // R5: simulated slowness of relay allocation
@@ -22,7 +22,8 @@ type config struct {
 	ProcessedTable     string
 }
 
-func loadConfig() (config, error) {
+// Load reads the service configuration from environment variables.
+func Load() (Config, error) {
 	var missing []string
 	need := func(k string) string {
 		v := os.Getenv(k)
@@ -31,7 +32,7 @@ func loadConfig() (config, error) {
 		}
 		return v
 	}
-	c := config{
+	c := Config{
 		Port:           envOr("PORT", "8080"),
 		RelayRequests:  need("RELAY_REQUESTS_QUEUE"),
 		RelayResults:   need("RELAY_RESULTS_QUEUE"),

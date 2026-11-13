@@ -1,4 +1,5 @@
-package main
+// Package messaging moves envelopes between the outbox and SQS.
+package messaging
 
 import (
 	"context"
@@ -8,19 +9,33 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+
+	"github.com/larpspeak/media-relay/internal/domain"
 )
 
-type bus struct {
+type Bus struct {
 	sqs  *sqs.Client
 	log  *slog.Logger
 	mu   sync.Mutex
 	urls map[string]string
 }
 
+func New(q *sqs.Client, log *slog.Logger) *Bus {
+	return &Bus{sqs: q, log: log, urls: map[string]string{}}
+}
+
+// Row is one pending outbox entry.
+type Row struct{ ID, Dest, Body string }
+
+// Outbox is the outbox table, as the relay loop needs it.
+type Outbox interface {
+	PendingOutbox(ctx context.Context) ([]Row, error)
+	DeleteOutbox(ctx context.Context, id string) error
+}
+
 // queueURL resolves and caches a queue URL by name; it retries naturally on the next call if the broker is down.
-func (b *bus) queueURL(ctx context.Context, name string) (string, error) {
+func (b *Bus) queueURL(ctx context.Context, name string) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if u, ok := b.urls[name]; ok {
@@ -43,10 +58,10 @@ func (b *backoff) fail() {
 }
 func (b *backoff) ok() { b.d = 0 }
 
-// consume long-polls a queue forever. A message is deleted only after it was
+// Consume long-polls a queue forever. A message is deleted only after it was
 // handled (or recognised as a duplicate); anything else is redelivered and, after
 // maxReceiveCount attempts, moved to the DLQ by SQS (R1, F2, F4).
-func (b *bus) consume(ctx context.Context, queue string, handle func(context.Context, envelope) error) {
+func (b *Bus) Consume(ctx context.Context, queue string, handle func(context.Context, domain.Envelope) error) {
 	var bo backoff
 	for ctx.Err() == nil {
 		url, err := b.queueURL(ctx, queue)
@@ -65,13 +80,13 @@ func (b *bus) consume(ctx context.Context, queue string, handle func(context.Con
 		}
 		bo.ok()
 		for _, m := range out.Messages {
-			e, err := parseEnvelope(aws.ToString(m.Body))
+			e, err := domain.ParseEnvelope(aws.ToString(m.Body))
 			if err != nil {
 				b.log.Error("poison message left for DLQ", "queue", queue, "err", err)
 				continue
 			}
 			err = handle(ctx, e)
-			if errors.Is(err, errDuplicate) {
+			if errors.Is(err, domain.ErrDuplicate) {
 				b.log.Info("duplicate ignored", "messageId", e.MessageID, "correlationId", e.CorrelationID, "type", e.Type)
 			} else if err != nil {
 				b.log.Warn("handling failed, will be redelivered", "messageId", e.MessageID, "correlationId", e.CorrelationID, "err", err)
@@ -84,25 +99,25 @@ func (b *bus) consume(ctx context.Context, queue string, handle func(context.Con
 	}
 }
 
-// relayOutbox publishes outbox rows and deletes them after a successful send.
+// RelayOutbox publishes outbox rows and deletes them after a successful send.
 // A crash between send and delete republishes the same messageId; consumers dedupe it.
-func relayOutbox(ctx context.Context, st *store, b *bus) {
+func RelayOutbox(ctx context.Context, ob Outbox, b *Bus) {
 	var bo backoff
 	for ctx.Err() == nil {
-		out, err := st.db.Scan(ctx, &dynamodb.ScanInput{TableName: &st.cfg.OutboxTable, ConsistentRead: aws.Bool(true)})
+		rows, err := ob.PendingOutbox(ctx)
 		if err != nil {
 			b.log.Warn("outbox scan failed, retrying", "err", err)
 			bo.fail()
 			continue
 		}
-		for _, item := range out.Items {
-			id, dest, body := attr(item, "pk"), attr(item, "dest"), attr(item, "body")
+		for _, row := range rows {
+			id, dest, body := row.ID, row.Dest, row.Body
 			if err := b.publish(ctx, dest, body); err != nil {
 				b.log.Warn("outbox publish failed, will retry", "messageId", id, "dest", dest, "err", err)
 				bo.fail()
 				break
 			}
-			if _, err := st.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &st.cfg.OutboxTable, Key: key(id)}); err != nil {
+			if err := ob.DeleteOutbox(ctx, id); err != nil {
 				b.log.Warn("outbox delete failed", "messageId", id, "err", err)
 			}
 			b.log.Info("published", "messageId", id, "dest", dest)
@@ -112,7 +127,7 @@ func relayOutbox(ctx context.Context, st *store, b *bus) {
 	}
 }
 
-func (b *bus) publish(ctx context.Context, queue, body string) error {
+func (b *Bus) publish(ctx context.Context, queue, body string) error {
 	url, err := b.queueURL(ctx, queue)
 	if err != nil {
 		return err

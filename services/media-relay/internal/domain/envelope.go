@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"encoding/json"
@@ -8,8 +8,8 @@ import (
 	"uuid"
 )
 
-// envelope is the shared message format defined in contracts/envelope.schema.json.
-type envelope struct {
+// Envelope is the shared message format defined in contracts/envelope.schema.json.
+type Envelope struct {
 	MessageID     string          `json:"messageId"`
 	CorrelationID string          `json:"correlationId"`
 	Type          string          `json:"type"`
@@ -18,12 +18,12 @@ type envelope struct {
 	Payload       json.RawMessage `json:"payload"`
 }
 
-func newEnvelope(typ, correlationID string, payload any) (envelope, error) {
+func NewEnvelope(typ, correlationID string, payload any) (Envelope, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return envelope{}, err
+		return Envelope{}, err
 	}
-	return envelope{
+	return Envelope{
 		MessageID:     uuid.New().String(),
 		CorrelationID: correlationID,
 		Type:          typ,
@@ -33,10 +33,10 @@ func newEnvelope(typ, correlationID string, payload any) (envelope, error) {
 	}, nil
 }
 
-// parseEnvelope rejects anything that does not match the contract, so poison
+// ParseEnvelope rejects anything that does not match the contract, so poison
 // messages are never acknowledged and end up in the DLQ.
-func parseEnvelope(body string) (envelope, error) {
-	var e envelope
+func ParseEnvelope(body string) (Envelope, error) {
+	var e Envelope
 	if err := json.Unmarshal([]byte(body), &e); err != nil {
 		return e, fmt.Errorf("invalid json: %w", err)
 	}

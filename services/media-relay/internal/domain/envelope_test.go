@@ -1,10 +1,10 @@
-package main
+package domain
 
 import "testing"
 
 func TestParseEnvelope(t *testing.T) {
 	valid := `{"messageId":"m1","correlationId":"c1","type":"RelayFailed","version":1,"occurredAt":"2026-11-13T10:00:00Z","payload":{"callId":"c1"}}`
-	if _, err := parseEnvelope(valid); err != nil {
+	if _, err := ParseEnvelope(valid); err != nil {
 		t.Fatalf("valid envelope rejected: %v", err)
 	}
 	poison := map[string]string{
@@ -15,23 +15,8 @@ func TestParseEnvelope(t *testing.T) {
 		"missing payload": `{"messageId":"m1","correlationId":"c1","type":"T","version":1,"occurredAt":"2026-11-13T10:00:00Z"}`,
 	}
 	for name, body := range poison {
-		if _, err := parseEnvelope(body); err == nil {
+		if _, err := ParseEnvelope(body); err == nil {
 			t.Errorf("%s: accepted, want rejection", name)
-		}
-	}
-}
-
-func TestParseHeader(t *testing.T) {
-	c, u, ok := parseHeader([]byte("call-1 ana\nAUDIO"))
-	if !ok || c != "call-1" || u != "ana" {
-		t.Fatalf("got %q %q %v", c, u, ok)
-	}
-	if c, u, ok := parseHeader([]byte("call-1 ana 42\nAUDIO")); !ok || c != "call-1" || u != "ana" {
-		t.Fatalf("with seq: got %q %q %v", c, u, ok)
-	}
-	for _, bad := range []string{"no newline", "onlycall\nx", " \nx", "call-1 \nx"} {
-		if _, _, ok := parseHeader([]byte(bad)); ok {
-			t.Errorf("%q accepted", bad)
 		}
 	}
 }
