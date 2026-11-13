@@ -64,8 +64,9 @@ func main() {
 
 	api := &client{base: strings.TrimRight(*server, "/"), user: *user}
 	invites := make(chan string, 1)
-	gone := make(chan string, 4) // call ids we were removed from (ended, failed, moved)
-	go api.notifications(ctx, invites, gone)
+	gone := make(chan string, 4)    // call ids we were removed from (ended, failed, moved)
+	moved := make(chan callInfo, 4) // relay failover: new address for a call
+	go api.notifications(ctx, invites, gone, moved)
 
 	var info callInfo
 	var err error
@@ -105,7 +106,30 @@ func main() {
 			}
 		}
 	}()
-	err = talk(callCtx, info, *user, *mute, *loss)
+	relayAddr := func(i callInfo) (*net.UDPAddr, error) {
+		if *relay != "" {
+			i.RelayHost = *relay
+		}
+		return net.ResolveUDPAddr("udp", net.JoinHostPort(i.RelayHost, strconv.Itoa(i.RelayPort)))
+	}
+	var target atomic.Pointer[net.UDPAddr]
+	addr, err := relayAddr(info)
+	if err != nil {
+		log.Fatal(err)
+	}
+	target.Store(addr)
+	go func() {
+		for m := range moved {
+			if m.CallID != info.CallID {
+				continue
+			}
+			if a, err := relayAddr(m); err == nil {
+				target.Store(a)
+				log.Printf("relay failed over, audio now goes to %s", a)
+			}
+		}
+	}()
+	err = talk(callCtx, info, &target, *user, *mute, *loss)
 	hangUp()
 	if !removed.Load() {
 		if lerr := api.leave(info.CallID); lerr != nil {
@@ -119,8 +143,10 @@ func main() {
 }
 
 // talk runs full duplex audio: mic -> UDP and UDP -> jitter buffers -> mixer -> speakers.
-func talk(ctx context.Context, info callInfo, user string, mute bool, loss float64) error {
-	conn, err := net.Dial("udp", net.JoinHostPort(info.RelayHost, strconv.Itoa(info.RelayPort)))
+// The relay address can change mid-call (failover), so the socket is not
+// connected to one address: every packet goes to whatever target holds now.
+func talk(ctx context.Context, info callInfo, target *atomic.Pointer[net.UDPAddr], user string, mute bool, loss float64) error {
+	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return err
 	}
@@ -149,7 +175,7 @@ func talk(ctx context.Context, info callInfo, user string, mute bool, loss float
 
 	m := newMixer()
 	errs := make(chan error, 3)
-	go func() { errs <- send(conn, mic, info.CallID, user) }()
+	go func() { errs <- send(conn, target, mic, info.CallID, user) }()
 	go func() { errs <- receive(conn, m, info.CallID, loss) }()
 	go func() { errs <- playout(ctx, m, speaker) }()
 	go reportStats(ctx, m)
@@ -164,7 +190,7 @@ func talk(ctx context.Context, info callInfo, user string, mute bool, loss float
 
 // send reads 20 ms of mic audio at a time. Each packet carries the current
 // frame plus the previous one, so the receiver can rebuild a single lost packet.
-func send(conn net.Conn, mic io.Reader, callID, user string) error {
+func send(conn *net.UDPConn, target *atomic.Pointer[net.UDPAddr], mic io.Reader, callID, user string) error {
 	cur, prev := make([]byte, frameBytes), make([]byte, frameBytes)
 	for seq := uint32(1); ; seq++ {
 		if _, err := io.ReadFull(mic, cur); err != nil {
@@ -172,7 +198,7 @@ func send(conn net.Conn, mic io.Reader, callID, user string) error {
 		}
 		pkt := fmt.Appendf(nil, "%s %s %d\n", callID, user, seq)
 		pkt = append(append(pkt, cur...), prev...)
-		if _, err := conn.Write(pkt); err != nil {
+		if _, err := conn.WriteToUDP(pkt, target.Load()); err != nil {
 			log.Printf("send: %v", err) // keep going: UDP errors are transient
 		}
 		cur, prev = prev, cur
@@ -188,10 +214,10 @@ func (silence) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func receive(conn net.Conn, m *mixer, callID string, loss float64) error {
+func receive(conn *net.UDPConn, m *mixer, callID string, loss float64) error {
 	buf := make([]byte, 64*1024)
 	for {
-		n, err := conn.Read(buf)
+		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) || strings.Contains(err.Error(), "refused") {
@@ -319,7 +345,7 @@ func (c *client) leave(callID string) error {
 }
 
 // notifications prints the user's SSE events and forwards invitations.
-func (c *client) notifications(ctx context.Context, invites, gone chan<- string) {
+func (c *client) notifications(ctx context.Context, invites, gone chan<- string, moved chan<- callInfo) {
 	for ctx.Err() == nil {
 		req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/users/"+c.user+"/notifications", nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -336,10 +362,12 @@ func (c *client) notifications(ctx context.Context, invites, gone chan<- string)
 				event = strings.TrimPrefix(line, "event: ")
 			case strings.HasPrefix(line, "data: "):
 				var d struct {
-					CallID string `json:"callId"`
-					From   string `json:"from"`
-					UserID string `json:"userId"`
-					Reason string `json:"reason"`
+					CallID    string `json:"callId"`
+					From      string `json:"from"`
+					UserID    string `json:"userId"`
+					Reason    string `json:"reason"`
+					RelayHost string `json:"relayHost"`
+					RelayPort int    `json:"relayPort"`
 				}
 				_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &d)
 				switch event {
@@ -351,6 +379,11 @@ func (c *client) notifications(ctx context.Context, invites, gone chan<- string)
 					}
 				case "participant_joined", "participant_left":
 					log.Printf("%s %s", d.UserID, strings.TrimPrefix(event, "participant_"))
+				case "relay_moved":
+					select {
+					case moved <- callInfo{CallID: d.CallID, RelayHost: d.RelayHost, RelayPort: d.RelayPort}:
+					default:
+					}
 				case "call_ended", "call_failed", "left_call":
 					log.Printf("%s %s: %s", strings.ReplaceAll(event, "_", " "), d.CallID, d.Reason)
 					select {
