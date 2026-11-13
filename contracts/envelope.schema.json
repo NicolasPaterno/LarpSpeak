@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/envelope.schema.json",
+  "title": "Envelope",
+  "description": "Every message on SQS/SNS uses this envelope. Consumers dedupe on messageId.",
+  "type": "object",
+  "required": ["messageId", "correlationId", "type", "version", "occurredAt", "payload"],
+  "properties": {
+    "messageId": { "type": "string", "format": "uuid" },
+    "correlationId": { "type": "string", "description": "callId of the saga this message belongs to" },
+    "type": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/ReleaseRelayRequested.v1.schema.json",
+  "title": "ReleaseRelayRequested v1",
+  "description": "Command (compensation): release a relay, e.g. one that arrived after the saga timed out. Channel: SQS relay-requests (call-signaling -> media-relay).",
+  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "properties": {
+    "type": { "const": "ReleaseRelayRequested" },
+    "version": { "const": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["callId", "relayId"],
+      "properties": { "callId": { "type": "string" }, "relayId": { "type": "string" } }
+    }
+  }
+}

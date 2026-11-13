@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/CallEnded.v1.schema.json",
+  "title": "CallEnded v1",
+  "description": "Fact: a call finished; media-relay frees the relay, audit-vault records it. Channel: SNS call-events -> media-relay, audit-vault (event with multiple consumers).",
+  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "properties": {
+    "type": { "const": "CallEnded" },
+    "version": { "const": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["callId", "durationMs", "reason"],
+      "properties": { "callId": { "type": "string" }, "relayId": { "type": "string" }, "durationMs": { "type": "integer", "minimum": 0 }, "reason": { "type": "string" } }
+    }
+  }
+}

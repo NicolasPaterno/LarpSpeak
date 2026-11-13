@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/RelayAllocated.v1.schema.json",
+  "title": "RelayAllocated v1",
+  "description": "Reply: relay ready for audio. Channel: SQS relay-results (media-relay -> call-signaling).",
+  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "properties": {
+    "type": { "const": "RelayAllocated" },
+    "version": { "const": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["callId", "relayId", "host", "port"],
+      "properties": { "callId": { "type": "string" }, "relayId": { "type": "string" }, "host": { "type": "string" }, "port": { "type": "integer" } }
+    }
+  }
+}

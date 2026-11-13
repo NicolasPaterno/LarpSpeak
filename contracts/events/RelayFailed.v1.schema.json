@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/RelayFailed.v1.schema.json",
+  "title": "RelayFailed v1",
+  "description": "Reply: relay allocation failed (simulated unstable dependency). Channel: SQS relay-results (media-relay -> call-signaling).",
+  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "properties": {
+    "type": { "const": "RelayFailed" },
+    "version": { "const": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["callId", "reason"],
+      "properties": { "callId": { "type": "string" }, "reason": { "type": "string" } }
+    }
+  }
+}
