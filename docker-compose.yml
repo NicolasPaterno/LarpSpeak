@@ -1,0 +1,77 @@
+# Whole system: `docker compose up --build`
+x-aws: &aws
+  AWS_ENDPOINT_URL: http://ministack:4566
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+
+x-after-init: &after-init
+  depends_on:
+    infra-init:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  ministack:
+    image: ministackorg/ministack:1.5.40
+    ports: ["4566:4566"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  infra-init:
+    image: amazon/aws-cli:2.39.0
+    entrypoint: ["bash", "/init/init.sh"]
+    environment: *aws
+    volumes: ["./infra/init:/init:ro"]
+    depends_on:
+      ministack:
+        condition: service_healthy
+
+  call-signaling:
+    <<: *after-init
+    build: ./services/call-signaling
+    ports: ["8081:8080"]
+    environment:
+      <<: *aws
+      SERVICE_NAME: call-signaling
+      ROOM_CAPACITY: ${ROOM_CAPACITY:-10}
+      RELAY_TIMEOUT_MS: ${RELAY_TIMEOUT_MS:-3000}
+      CALL_EVENTS_TOPIC: call-events
+      RELAY_REQUESTS_QUEUE: relay-requests
+      RELAY_RESULTS_QUEUE: relay-results
+      CALLS_TABLE: signaling-calls
+      ROOMS_TABLE: signaling-rooms
+      OUTBOX_TABLE: signaling-outbox
+      PROCESSED_TABLE: signaling-processed
+
+  media-relay:
+    <<: *after-init
+    build: ./services/media-relay
+    deploy:
+      replicas: ${MEDIA_RELAY_REPLICAS:-2}
+    environment:
+      <<: *aws
+      SERVICE_NAME: media-relay
+      RELAY_LATENCY_MS: ${RELAY_LATENCY_MS:-200}
+      RELAY_FAILURE_RATE: ${RELAY_FAILURE_RATE:-0.0}
+      RELAY_REQUESTS_QUEUE: relay-requests
+      RELAY_RESULTS_QUEUE: relay-results
+      CALL_EVENTS_QUEUE: media-relay-call-events
+      SESSIONS_TABLE: relay-sessions
+      PROCESSED_TABLE: relay-processed
+
+  audit-vault:
+    <<: *after-init
+    build: ./services/audit-vault
+    ports: ["8083:8080"]
+    environment:
+      <<: *aws
+      SERVICE_NAME: audit-vault
+      CALL_EVENTS_QUEUE: audit-vault-call-events
+      AUDIT_TABLE: audit-records
+      PROCESSED_TABLE: audit-processed
+      AUDIO_BUCKET: larpspeak-audio
+      AUDIO_KEY_SECRET: larpspeak/audio-key
