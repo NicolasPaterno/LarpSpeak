@@ -307,6 +307,28 @@ func (sg *saga) leave(ctx context.Context, id, user string, extra ...types.Trans
 	return errStateChanged
 }
 
+// invite adds a user to an active call's invite list and notifies them. Only a
+// participant can invite. Inviting twice just notifies again.
+func (sg *saga) invite(ctx context.Context, id, from, to string) error {
+	c, err := sg.st.getCall(ctx, id)
+	switch {
+	case err != nil:
+		return err
+	case c == nil || c.Status != statusActive:
+		return errNotActive
+	case !c.has(from):
+		return errNotIn
+	}
+	if !slices.Contains(c.Invited, to) {
+		if err := sg.st.addInvite(ctx, id, to); err != nil {
+			return err
+		}
+	}
+	sg.hub.notify(to, "incoming_call", map[string]any{"callId": id, "from": from})
+	sg.log.Info("participant invited", "correlationId", id, "userId", from, "inviteeId", to)
+	return nil
+}
+
 // replayInvites resends invitations the user missed while not connected:
 // active calls that invited them and that they have not joined yet.
 func (sg *saga) replayInvites(ctx context.Context, user string) {

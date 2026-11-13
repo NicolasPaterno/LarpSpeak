@@ -58,6 +58,7 @@ func main() {
 	mux.HandleFunc("GET /calls/{id}", sg.handleGet)
 	mux.HandleFunc("POST /calls/{id}/join", sg.handleJoin)
 	mux.HandleFunc("POST /calls/{id}/leave", sg.handleLeave)
+	mux.HandleFunc("POST /calls/{id}/invite", sg.handleInvite)
 	mux.HandleFunc("GET /users/{userId}/notifications", h.serve)
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
@@ -164,6 +165,31 @@ func (sg *saga) handleLeave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
 	default:
 		writeJSON(w, http.StatusAccepted, map[string]string{"callId": r.PathValue("id"), "userId": user, "status": "left"})
+	}
+}
+
+// handleInvite: POST /calls/{id}/invite {userId, inviteeId} -> 202; a participant
+// invites someone into an active call, who gets an incoming_call notification.
+func (sg *saga) handleInvite(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID    string `json:"userId"`
+		InviteeID string `json:"inviteeId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.UserID == "" || req.InviteeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId and inviteeId are required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	err := sg.invite(ctx, r.PathValue("id"), req.UserID, req.InviteeID)
+	switch {
+	case errors.Is(err, errNotActive), errors.Is(err, errNotIn):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		sg.log.Error("invite failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]string{"callId": r.PathValue("id"), "inviteeId": req.InviteeID, "status": "invited"})
 	}
 }
 

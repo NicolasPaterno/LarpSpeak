@@ -129,6 +129,26 @@ func (s *store) forgetUser(ctx context.Context, user, callID string) {
 	})
 }
 
+// addInvite appends a user to an active call's invite list.
+func (s *store) addInvite(ctx context.Context, id, user string) error {
+	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &s.cfg.CallsTable,
+		Key:                      key(id),
+		UpdateExpression:         aws.String("SET invited = list_append(if_not_exists(invited, :none), :u)"),
+		ConditionExpression:      aws.String("#s = :active"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":none": &types.AttributeValueMemberL{}, ":u": &types.AttributeValueMemberL{Value: []types.AttributeValue{str(user)}},
+			":active": str(statusActive),
+		},
+	})
+	var ccf *types.ConditionalCheckFailedException
+	if errors.As(err, &ccf) {
+		return errNotActive
+	}
+	return err
+}
+
 // --- transaction items ---
 
 // claimUser records that the user is now in callID. It fails if the user is
