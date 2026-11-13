@@ -37,13 +37,12 @@ services:
     environment:
       <<: *aws
       SERVICE_NAME: call-signaling
-      ROOM_CAPACITY: ${ROOM_CAPACITY:-10}
+      MAX_PARTICIPANTS: ${MAX_PARTICIPANTS:-10}
       RELAY_TIMEOUT_MS: ${RELAY_TIMEOUT_MS:-3000}
       CALL_EVENTS_TOPIC_ARN: arn:aws:sns:${AWS_REGION:-us-east-1}:000000000000:call-events
       RELAY_REQUESTS_QUEUE: relay-requests
       RELAY_RESULTS_QUEUE: relay-results
       CALLS_TABLE: signaling-calls
-      ROOMS_TABLE: signaling-rooms
       OUTBOX_TABLE: signaling-outbox
       PROCESSED_TABLE: signaling-processed
 

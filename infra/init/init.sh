@@ -35,7 +35,7 @@ for q in media-relay-call-events audit-vault-call-events; do
 done
 
 # Database per service.
-for t in signaling-calls signaling-rooms signaling-outbox signaling-processed \
+for t in signaling-calls signaling-outbox signaling-processed \
          relay-sessions relay-outbox relay-processed audit-records audit-processed; do table "$t"; done
 
 # Object storage + secret for audio encryption.
