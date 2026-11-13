@@ -1,5 +1,6 @@
 // media-relay: allocates audio relays (simulated unstable dependency), forwards
-// UDP audio between call participants and frees relays when calls end or go idle.
+// UDP audio between call participants, frees relays when calls end and reports
+// participants whose client disappeared.
 package main
 
 import (
@@ -62,7 +63,7 @@ func main() {
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()); _ = conn.Close() }()
 	log.Info("listening", "http", srv.Addr, "udp", cfg.UDPPort, "host", r.host,
-		"latency", cfg.Latency.String(), "failureRate", cfg.FailureRate, "idleTimeout", cfg.IdleTimeout.String())
+		"latency", cfg.Latency.String(), "failureRate", cfg.FailureRate, "participantTimeout", cfg.ParticipantTimeout.String())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)

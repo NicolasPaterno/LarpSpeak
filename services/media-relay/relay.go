@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"sync"
 	"time"
 	"uuid"
@@ -20,8 +21,22 @@ type liveSession struct {
 	relayID      string
 	participants map[string]bool
 	addrs        map[string]*net.UDPAddr
-	lastAudio    time.Time
-	lastRefresh  time.Time // last reload of participants from DynamoDB
+	lastSeen     map[string]time.Time // last packet per participant (muted clients still send)
+	reported     map[string]bool      // participants already reported as timed out
+	lastRefresh  time.Time            // last reload of participants from DynamoDB
+}
+
+func (ls *liveSession) add(user string) {
+	if !ls.participants[user] {
+		ls.participants[user], ls.lastSeen[user] = true, time.Now()
+	}
+}
+
+func (ls *liveSession) remove(user string) {
+	delete(ls.participants, user)
+	delete(ls.addrs, user)
+	delete(ls.lastSeen, user)
+	delete(ls.reported, user)
 }
 
 type relay struct {
@@ -95,10 +110,9 @@ func (r *relay) member(ctx context.Context, e envelope, ref callRef, op string) 
 	r.mu.Lock()
 	if ls := r.live[ref.CallID]; ls != nil {
 		if op == "ADD" {
-			ls.participants[ref.UserID] = true
+			ls.add(ref.UserID)
 		} else {
-			delete(ls.participants, ref.UserID)
-			delete(ls.addrs, ref.UserID)
+			ls.remove(ref.UserID)
 		}
 	}
 	r.mu.Unlock()
@@ -128,13 +142,12 @@ func (r *relay) refresh(ctx context.Context, callID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if ls := r.live[callID]; ls != nil {
-		ls.participants = map[string]bool{}
 		for _, p := range ss.Participants {
-			ls.participants[p] = true
+			ls.add(p)
 		}
-		for u := range ls.addrs {
-			if !ls.participants[u] {
-				delete(ls.addrs, u)
+		for u := range ls.participants {
+			if !slices.Contains(ss.Participants, u) {
+				ls.remove(u)
 			}
 		}
 	}
@@ -208,9 +221,10 @@ func (r *relay) release(ctx context.Context, e envelope, callID, reason string) 
 }
 
 func (r *relay) track(ss session) {
-	ls := &liveSession{relayID: ss.RelayID, participants: map[string]bool{}, addrs: map[string]*net.UDPAddr{}, lastAudio: time.Now()}
+	ls := &liveSession{relayID: ss.RelayID, participants: map[string]bool{}, addrs: map[string]*net.UDPAddr{},
+		lastSeen: map[string]time.Time{}, reported: map[string]bool{}}
 	for _, p := range ss.Participants {
-		ls.participants[p] = true
+		ls.add(p)
 	}
 	r.mu.Lock()
 	r.live[ss.CallID] = ls
@@ -249,7 +263,7 @@ func (r *relay) serveUDP(ctx context.Context, conn *net.UDPConn) {
 			continue // unknown call or not (yet) a participant: drop
 		}
 		ls.addrs[userID] = from
-		ls.lastAudio = time.Now()
+		ls.lastSeen[userID] = time.Now()
 		var targets []*net.UDPAddr
 		for u, a := range ls.addrs {
 			if u != userID {
@@ -272,48 +286,60 @@ func parseHeader(p []byte) (callID, userID string, ok bool) {
 	return string(f[0]), string(f[1]), true
 }
 
-// sweep closes relays with no audio for RELAY_IDLE_TIMEOUT_MS (abandoned calls)
-// and drops local sessions that another replica already released.
+// sweep reports participants whose client stopped sending packets for
+// PARTICIPANT_TIMEOUT_MS (crashed app, lost network). call-signaling then removes
+// them like a normal leave, and the call ends only when the last one is gone.
+// Silence is not a timeout: muted clients keep sending packets.
+// It also drops local sessions released elsewhere and syncs participants.
 // ponytail: one GetItem per live session every 2s; fine for demo-sized load.
-// ponytail: if the owning replica dies, its relays are not idle-closed; add a
-// max call duration in call-signaling if that matters.
+// ponytail: if the owning replica dies, its participants are never timed out;
+// a heartbeat check in call-signaling would cover that.
 func (r *relay) sweep(ctx context.Context) {
 	for ctx.Err() == nil {
 		time.Sleep(2 * time.Second)
+		type gone struct{ callID, userID string }
+		var timedOut []gone
+		var calls []string
 		r.mu.Lock()
-		snapshot := make(map[string]liveSession, len(r.live))
-		for id, ls := range r.live {
-			snapshot[id] = *ls
+		for callID, ls := range r.live {
+			calls = append(calls, callID)
+			for u, seen := range ls.lastSeen {
+				if !ls.reported[u] && time.Since(seen) > r.cfg.ParticipantTimeout {
+					ls.reported[u] = true
+					timedOut = append(timedOut, gone{callID, u})
+				}
+			}
 		}
 		r.mu.Unlock()
 
-		for callID, ls := range snapshot {
-			if time.Since(ls.lastAudio) > r.cfg.IdleTimeout {
-				r.closeIdle(ctx, callID, ls.relayID)
-				continue
+		for _, g := range timedOut {
+			if err := r.reportTimeout(ctx, g.callID, g.userID); err != nil {
+				r.log.Warn("timeout report failed, retrying", "correlationId", g.callID, "userId", g.userID, "err", err)
+				r.mu.Lock()
+				if ls := r.live[g.callID]; ls != nil {
+					delete(ls.reported, g.userID)
+				}
+				r.mu.Unlock()
 			}
-			r.refresh(ctx, callID) // drops sessions released elsewhere, syncs participants
+		}
+		for _, callID := range calls {
+			r.refresh(ctx, callID)
 		}
 	}
 }
 
-func (r *relay) closeIdle(ctx context.Context, callID, relayID string) {
-	closed, err := newEnvelope("RelayClosed", callID, map[string]string{"callId": callID, "relayId": relayID, "reason": "idle"})
+func (r *relay) reportTimeout(ctx context.Context, callID, userID string) error {
+	e, err := newEnvelope("ParticipantTimedOut", callID, map[string]string{"callId": callID, "userId": userID})
 	if err != nil {
-		return
+		return err
 	}
-	out, err := r.st.outbox(r.cfg.RelayResults, closed)
+	out, err := r.st.outbox(r.cfg.RelayResults, e)
 	if err != nil {
-		return
+		return err
 	}
-	// Item 0 is the state guard here, so "duplicate" means someone already released it.
-	switch err := r.st.commit(ctx, r.st.release(callID, "idle"), out); {
-	case err == nil:
-		r.log.Warn("relay closed: no audio", "correlationId", callID, "idleTimeout", r.cfg.IdleTimeout.String())
-		r.untrack(callID)
-	case errors.Is(err, errDuplicate):
-		r.untrack(callID)
-	default:
-		r.log.Warn("idle close failed, retrying", "correlationId", callID, "err", err)
+	if err := r.st.commit(ctx, out); err != nil {
+		return err
 	}
+	r.log.Warn("participant timed out: no packets", "correlationId", callID, "userId", userID, "timeout", r.cfg.ParticipantTimeout.String())
+	return nil
 }

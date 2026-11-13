@@ -8,17 +8,17 @@ import (
 )
 
 type config struct {
-	Port           string
-	UDPPort        int
-	Latency        time.Duration // R5: simulated slowness of relay allocation
-	FailureRate    float64       // R5: probability that an allocation fails
-	IdleTimeout    time.Duration // free a relay after this long without audio
-	RelayRequests  string
-	RelayResults   string
-	CallEvents     string
-	SessionsTable  string
-	OutboxTable    string
-	ProcessedTable string
+	Port               string
+	UDPPort            int
+	Latency            time.Duration // R5: simulated slowness of relay allocation
+	FailureRate        float64       // R5: probability that an allocation fails
+	ParticipantTimeout time.Duration // a participant sending no packets this long is gone
+	RelayRequests      string
+	RelayResults       string
+	CallEvents         string
+	SessionsTable      string
+	OutboxTable        string
+	ProcessedTable     string
 }
 
 func loadConfig() (config, error) {
@@ -52,7 +52,7 @@ func loadConfig() (config, error) {
 	if c.Latency, err = millis("RELAY_LATENCY_MS", "0"); err != nil {
 		return c, err
 	}
-	if c.IdleTimeout, err = millis("RELAY_IDLE_TIMEOUT_MS", "30000"); err != nil {
+	if c.ParticipantTimeout, err = millis("PARTICIPANT_TIMEOUT_MS", "15000"); err != nil {
 		return c, err
 	}
 	return c, nil
