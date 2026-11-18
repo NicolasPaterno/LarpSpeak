@@ -9,4 +9,5 @@ RUN npm run build
 
 FROM nginx:1.29.3-alpine
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY --chmod=755 nginx/30-tls.sh /docker-entrypoint.d/30-tls.sh
 COPY --from=build /src/dist /usr/share/nginx/html

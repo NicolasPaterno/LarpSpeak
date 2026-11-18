@@ -55,7 +55,8 @@ services:
 
   web:
     build: ./web
-    ports: ["8080:80"]
+    ports: ["8080:80", "8443:443"] # 8443 = HTTPS when web/certs exists (make certs); mic on other machines needs it
+    volumes: ["./web/certs:/etc/nginx/certs:ro"]
     environment:
       SIGNALING_URL: http://call-signaling:8080
     depends_on: [call-signaling]

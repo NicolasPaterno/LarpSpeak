@@ -19,7 +19,7 @@ TOKEN = curl -s -o /dev/null -XPOST $(SERVER)/auth/register -d '{"username":"$(M
 CLIENT_FLAGS = -server $(SERVER) -user $(ME) $(if $(MUTE),-mute) $(if $(DEAFEN),-deafen) \
 	$(if $(NOMIC),-nomic) $(if $(LOSS),-loss $(LOSS)) $(if $(RELAY),-relay $(RELAY))
 
-.PHONY: help build start stop clean logs ps call join listen invite leave status mute deafen test
+.PHONY: help build start stop clean certs logs ps call join listen invite leave status mute deafen test
 
 help: ## lista os comandos
 	@grep -E '^[a-z_%0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-14s %s\n", $$1, $$2}'
@@ -45,6 +45,13 @@ stop: ## derruba os serviços (o MiniStack guarda estado em memória: tudo zera)
 clean: ## derruba tudo e apaga volumes, imagens locais e o binário do cliente
 	$(COMPOSE) down -v --rmi local --remove-orphans
 	rm -rf bin
+
+certs: _need_host ## gera certificado HTTPS local (mkcert) para localhost e $RELAY_HOST: https://$RELAY_HOST:8443
+	@command -v mkcert >/dev/null || { echo "instale o mkcert: brew install mkcert"; exit 1; }
+	mkcert -install
+	@mkdir -p web/certs
+	mkcert -cert-file web/certs/cert.pem -key-file web/certs/key.pem localhost 127.0.0.1 $(RELAY_HOST)
+	@echo "reinicie o web: docker compose up -d --force-recreate web"
 
 logs: ## acompanha os logs (SERVICE=media-relay para um serviço só)
 	$(COMPOSE) logs -f $(SERVICE)
