@@ -26,5 +26,5 @@ step "Efeito aplicado uma única vez"
 logs media-relay "relay allocated.*$id"
 n=$(logs media-relay "relay allocated.*$id" | wc -l | tr -d ' ')
 [ "$n" = 1 ] || fail "relay alocado $n vezes"
-curl -s "$API/calls/$id" | jq '{status, relayId, relayHost}'
+call_json "$id" | jq '{status, relayId, relayHost}'
 ok "F2: chamada ACTIVE, 1 alocação, réplica morta não deixou efeito duplicado"

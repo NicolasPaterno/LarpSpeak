@@ -51,13 +51,28 @@ restore() {
   ok "pronto"
 }
 
+# Real login (only call-signaling creates tokens). Users are registered on first use.
+PW=${LARPSPEAK_PASSWORD:-larpspeak-demo}
+TOKENS=$(mktemp -d)
+# token USER: prints a Bearer token for USER (registers + logs in; cached for 4 min, tokens live 5).
+token() {
+  if [ -z "$(find "$TOKENS/$1" -mmin -4 2>/dev/null)" ]; then
+    curl -s -o /dev/null -XPOST "$API/auth/register" -d "{\"username\":\"$1\",\"password\":\"$PW\"}"
+    curl -s -XPOST "$API/auth/login" -d "{\"username\":\"$1\",\"password\":\"$PW\"}" | jq -r '.accessToken // empty' >"$TOKENS/$1"
+  fi
+  cat "$TOKENS/$1"
+}
+# api USER METHOD PATH [BODY]: authenticated request as USER.
+api() { curl -s -H "Authorization: Bearer $(token "$1")" -X"$2" "$API$3" ${4:+-d "$4"}; }
+
 # new_call CALLER [MAX] [INVITEE]: POST /calls, prints the callId.
 new_call() {
-  local body="{\"callerId\":\"$1\",\"maxParticipants\":${2:-0},\"calleeIds\":[${3:+\"$3\"}]}"
-  curl -s -XPOST "$API/calls" -d "$body" | jq -r .callId
+  api "$1" POST /calls "{\"maxParticipants\":${2:-0},\"calleeIds\":[${3:+\"$3\"}]}" | jq -r .callId
 }
 
-field() { curl -s "$API/calls/$1" | jq -r ".$2 // empty"; }
+# call_json CALL: GET /calls/{id} as an observer account.
+call_json() { api "observer-$RUN" GET "/calls/$1"; }
+field() { call_json "$1" | jq -r ".$2 // empty"; }
 
 # wait_status CALL STATUS SECONDS
 wait_status() {

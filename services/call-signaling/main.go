@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -17,15 +18,18 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/larpspeak/call-signaling/internal/adapter/dynamo"
 	"github.com/larpspeak/call-signaling/internal/adapter/httpapi"
 	"github.com/larpspeak/call-signaling/internal/adapter/messaging"
+	"github.com/larpspeak/call-signaling/internal/adapter/secrets"
 	"github.com/larpspeak/call-signaling/internal/adapter/sse"
 	"github.com/larpspeak/call-signaling/internal/app"
 	"github.com/larpspeak/call-signaling/internal/config"
+	"github.com/larpspeak/call-signaling/internal/domain"
 )
 
 func main() {
@@ -52,13 +56,22 @@ func main() {
 	svc := &app.Service{St: st, Hub: h, Log: log, Cfg: cfg, NowFn: time.Now}
 	h.Replay = svc.ReplayInvites
 
+	// Only this service holds the signing key, so only it can create tokens.
+	seed, err := secrets.LoadBytes(ctx, secretsmanager.NewFromConfig(awsCfg), cfg.JWTKeySecret, log)
+	if err != nil || len(seed) != ed25519.SeedSize {
+		log.Error("jwt key", "err", err, "bytes", len(seed))
+		os.Exit(1)
+	}
+	log.Info("jwt key loaded", "secretId", cfg.JWTKeySecret)
+	auth := &app.Auth{St: st, Key: ed25519.NewKeyFromSeed(seed), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL,
+		Iter: domain.PwIterations, Log: log, NowFn: time.Now}
+
 	go messaging.RelayOutbox(ctx, st, b, cfg.TopicArn)
 	go b.Consume(ctx, cfg.RelayResults, svc.OnRelayResult)
 	go svc.SweepTimeouts(ctx)
 
 	mux := http.NewServeMux()
-	(&httpapi.Handler{Svc: svc}).Register(mux)
-	mux.HandleFunc("GET /users/{userId}/notifications", h.Serve)
+	(&httpapi.Handler{Svc: svc, Auth: auth, SSE: h.Serve, CookieSecure: cfg.CookieSecure}).Register(mux)
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()

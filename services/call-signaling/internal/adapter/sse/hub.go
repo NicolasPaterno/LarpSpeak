@@ -32,9 +32,8 @@ func (h *Hub) Notify(userID, event string, data any) {
 	}
 }
 
-// Serve streams a user's notifications: GET /users/{userId}/notifications.
-func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("userId")
+// Serve streams the notifications of an already authenticated user.
+func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, userID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

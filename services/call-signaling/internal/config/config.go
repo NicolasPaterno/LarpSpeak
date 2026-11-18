@@ -18,6 +18,12 @@ type Config struct {
 	UsersTable      string
 	OutboxTable     string
 	ProcessedTable  string
+	AccountsTable   string
+	RefreshTable    string
+	JWTKeySecret    string // Secrets Manager id of the Ed25519 seed (only this service reads it)
+	AccessTTL       time.Duration
+	RefreshTTL      time.Duration
+	CookieSecure    bool
 }
 
 // Load reads the service configuration from environment variables.
@@ -39,6 +45,10 @@ func Load() (Config, error) {
 		UsersTable:     need("USERS_TABLE"),
 		OutboxTable:    need("OUTBOX_TABLE"),
 		ProcessedTable: need("PROCESSED_TABLE"),
+		AccountsTable:  need("ACCOUNTS_TABLE"),
+		RefreshTable:   need("REFRESH_TABLE"),
+		JWTKeySecret:   need("JWT_KEY_SECRET"),
+		CookieSecure:   envOr("COOKIE_SECURE", "true") != "false",
 	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("missing env vars: %v", missing)
@@ -52,7 +62,11 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("RELAY_TIMEOUT_MS must be a positive integer")
 	}
 	c.RelayTimeout = time.Duration(ms) * time.Millisecond
-	return c, nil
+	if c.AccessTTL, err = seconds("ACCESS_TOKEN_TTL_S", "300"); err != nil {
+		return c, err
+	}
+	c.RefreshTTL, err = seconds("REFRESH_TTL_S", "604800") // 7 days
+	return c, err
 }
 
 func envOr(key, def string) string {
@@ -60,4 +74,12 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func seconds(key, def string) (time.Duration, error) {
+	n, err := strconv.Atoi(envOr(key, def))
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return time.Duration(n) * time.Second, nil
 }

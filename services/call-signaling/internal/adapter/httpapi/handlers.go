@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 	"uuid"
@@ -14,7 +15,12 @@ import (
 	"github.com/larpspeak/call-signaling/internal/domain"
 )
 
-type Handler struct{ Svc *app.Service }
+type Handler struct {
+	Svc          *app.Service
+	Auth         *app.Auth
+	SSE          func(w http.ResponseWriter, r *http.Request, userID string) // notification stream of an authenticated user
+	CookieSecure bool
+}
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -25,10 +31,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /calls/{id}/join", h.handleJoin)
 	mux.HandleFunc("POST /calls/{id}/leave", h.handleLeave)
 	mux.HandleFunc("POST /calls/{id}/invite", h.handleInvite)
+	h.registerAuth(mux)
 }
 
 type createCallRequest struct {
-	CallerID        string   `json:"callerId"`
 	CalleeIDs       []string `json:"calleeIds"`       // invited users, notified when the call is live
 	MaxParticipants int      `json:"maxParticipants"` // seats in the call; default 2 for 1:1, MAX_PARTICIPANTS otherwise
 }
@@ -37,14 +43,18 @@ type createCallRequest struct {
 // The creator is the first participant; invited users join with POST /calls/{id}/join.
 func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	sg := h.Svc
+	caller, ok := h.user(w, r)
+	if !ok {
+		return
+	}
 	var req createCallRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || req.CallerID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "callerId is required"})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 	c := domain.Call{
-		ID: uuid.New().String(), CallerID: req.CallerID, Invited: req.CalleeIDs, Status: domain.StatusPending,
-		CreatedAt: sg.NowFn().UnixMilli(), Participants: []string{req.CallerID}, Taken: 1,
+		ID: uuid.New().String(), CallerID: caller, Invited: req.CalleeIDs, Status: domain.StatusPending,
+		CreatedAt: sg.NowFn().UnixMilli(), Participants: []string{caller}, Taken: 1,
 		Kind: domain.KindGroup, Capacity: req.MaxParticipants,
 	}
 	if c.Capacity == 0 {
@@ -70,22 +80,9 @@ func (h *Handler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"callId": c.ID, "status": c.Status, "statusUrl": "/calls/" + c.ID})
 }
 
-type userRequest struct {
-	UserID string `json:"userId"`
-}
-
-func decodeUser(w http.ResponseWriter, r *http.Request) (string, bool) {
-	var req userRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.UserID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
-		return "", false
-	}
-	return req.UserID, true
-}
-
-// handleJoin: POST /calls/{id}/join {userId} -> 200 with the relay address, 409 if full/inactive.
+// handleJoin: POST /calls/{id}/join (user from the token) -> 200 with the relay address, 409 if full/inactive.
 func (h *Handler) handleJoin(w http.ResponseWriter, r *http.Request) {
-	user, ok := decodeUser(w, r)
+	user, ok := h.user(w, r)
 	if !ok {
 		return
 	}
@@ -106,9 +103,9 @@ func (h *Handler) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleLeave: POST /calls/{id}/leave {userId} -> 202; the last one out ends the call.
+// handleLeave: POST /calls/{id}/leave (user from the token) -> 202; the last one out ends the call.
 func (h *Handler) handleLeave(w http.ResponseWriter, r *http.Request) {
-	user, ok := decodeUser(w, r)
+	user, ok := h.user(w, r)
 	if !ok {
 		return
 	}
@@ -126,20 +123,23 @@ func (h *Handler) handleLeave(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleInvite: POST /calls/{id}/invite {userId, inviteeId} -> 202; a participant
+// handleInvite: POST /calls/{id}/invite {inviteeId} -> 202; a participant
 // invites someone into an active call, who gets an incoming_call notification.
 func (h *Handler) handleInvite(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.user(w, r)
+	if !ok {
+		return
+	}
 	var req struct {
-		UserID    string `json:"userId"`
 		InviteeID string `json:"inviteeId"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.UserID == "" || req.InviteeID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId and inviteeId are required"})
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&req); err != nil || req.InviteeID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "inviteeId is required"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	err := h.Svc.Invite(ctx, r.PathValue("id"), req.UserID, req.InviteeID)
+	err := h.Svc.Invite(ctx, r.PathValue("id"), user, req.InviteeID)
 	switch {
 	case errors.Is(err, domain.ErrNotActive), errors.Is(err, domain.ErrNotIn):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -152,6 +152,9 @@ func (h *Handler) handleInvite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.user(w, r); !ok {
+		return
+	}
 	c, err := h.Svc.Get(r.Context(), r.PathValue("id"))
 	switch {
 	case err != nil:

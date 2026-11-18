@@ -40,3 +40,16 @@ type CallStore interface {
 type Notifier interface {
 	Notify(userID, event string, data any)
 }
+
+// AccountStore persists logins and refresh tokens.
+type AccountStore interface {
+	CreateAccount(ctx context.Context, a domain.Account) error // ErrTaken if the username exists
+	Account(ctx context.Context, user string) (*domain.Account, error)
+	// StartSession stores a new login family and its first refresh token.
+	StartSession(ctx context.Context, t domain.RefreshToken) error
+	RefreshToken(ctx context.Context, hash string) (*domain.RefreshToken, error) // nil if missing
+	// Rotate marks old USED and stores next, atomically and only while old is
+	// ACTIVE, unexpired and its family not revoked. ErrTokenInvalid otherwise.
+	Rotate(ctx context.Context, old domain.RefreshToken, next domain.RefreshToken, nowMs int64) error
+	RevokeFamily(ctx context.Context, family string) error
+}

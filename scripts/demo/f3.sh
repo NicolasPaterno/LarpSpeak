@@ -20,7 +20,7 @@ for _ in $(seq 1 30); do # all 5 copies handled?
 done
 
 step "Resultado"
-curl -s "$API/calls/$id" | jq '{status, relayId}'
+call_json "$id" | jq '{status, relayId}'
 logs call-signaling "$msg|call active.*$id" | grep -E "duplicate|call active" | cut -c1-200
 active=$(logs call-signaling "call active.*$id" | wc -l | tr -d ' ')
 dups=$(logs call-signaling "duplicate ignored.*$msg" | wc -l | tr -d ' ')

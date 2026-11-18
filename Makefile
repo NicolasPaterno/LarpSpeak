@@ -8,6 +8,12 @@ export RELAY_HOST
 COMPOSE := docker compose -f docker-compose.yml -f compose.voice.yml
 SERVER  ?= http://localhost:8081
 CLIENT  := bin/voice-client
+# Senha das contas (registradas no primeiro uso). Só o call-signaling cria tokens.
+LARPSPEAK_PASSWORD ?= larpspeak-demo
+export LARPSPEAK_PASSWORD
+# Comando que imprime um token de acesso para $(ME) (registra a conta se não existir).
+TOKEN = curl -s -o /dev/null -XPOST $(SERVER)/auth/register -d '{"username":"$(ME)","password":"$(LARPSPEAK_PASSWORD)"}'; \
+	curl -s -XPOST $(SERVER)/auth/login -d '{"username":"$(ME)","password":"$(LARPSPEAK_PASSWORD)"}' | jq -r .accessToken
 
 # Opções do cliente de voz: MUTE=1 DEAFEN=1 NOMIC=1 LOSS=0.1 RELAY=<host>
 CLIENT_FLAGS = -server $(SERVER) -user $(ME) $(if $(MUTE),-mute) $(if $(DEAFEN),-deafen) \
@@ -68,13 +74,13 @@ deafen: _need_me ## liga/desliga o áudio recebido (e o microfone): ME=ana
 	@pkill -USR2 -f -- "-user $(ME)( |$$)" && echo "deafen alternado para $(ME)" || echo "$(ME) não está em chamada nesta máquina"
 
 invite: _need_me ## convida alguém para a chamada: ME=ana CALL=<callId> TO=bob
-	@curl -s -XPOST $(SERVER)/calls/$(CALL)/invite -d '{"userId":"$(ME)","inviteeId":"$(TO)"}'; echo
+	@curl -s -XPOST -H "Authorization: Bearer $$($(TOKEN))" $(SERVER)/calls/$(CALL)/invite -d '{"inviteeId":"$(TO)"}'; echo
 
 leave: _need_me ## sai da chamada: ME=ana CALL=<callId>
-	@curl -s -XPOST $(SERVER)/calls/$(CALL)/leave -d '{"userId":"$(ME)"}'; echo
+	@curl -s -XPOST -H "Authorization: Bearer $$($(TOKEN))" $(SERVER)/calls/$(CALL)/leave; echo
 
-status: ## estado de uma chamada: CALL=<callId>
-	@curl -s $(SERVER)/calls/$(CALL); echo
+status: _need_me ## estado de uma chamada: ME=ana CALL=<callId>
+	@curl -s -H "Authorization: Bearer $$($(TOKEN))" $(SERVER)/calls/$(CALL); echo
 
 _need_me:
 	@test -n "$(ME)" || { echo "informe ME=<seu usuário>"; exit 1; }
