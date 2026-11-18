@@ -65,6 +65,8 @@ services:
       RELAY_FAILURE_RATE: ${RELAY_FAILURE_RATE:-0.0}
       PARTICIPANT_TIMEOUT_MS: ${PARTICIPANT_TIMEOUT_MS:-15000}
       UDP_PORT: "40000"
+      WEBRTC_UDP_PORT: "50000"
+      SIGNALING_URL: http://call-signaling:8080
       RELAY_REQUESTS_QUEUE: relay-requests
       RELAY_RESULTS_QUEUE: relay-results
       CALL_EVENTS_QUEUE: media-relay-call-events

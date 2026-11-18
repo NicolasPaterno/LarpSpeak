@@ -10,7 +10,8 @@
     "payload": {
       "type": "object",
       "required": ["callId", "relayId", "host", "port"],
-      "properties": { "callId": { "type": "string" }, "relayId": { "type": "string" }, "host": { "type": "string" }, "port": { "type": "integer" } }
+      "properties": { "callId": { "type": "string" }, "relayId": { "type": "string" }, "host": { "type": "string" }, "port": { "type": "integer" },
+        "signalAddr": { "type": "string", "description": "Optional (added 2026-11-18, backward compatible): host:port of the owning media-relay pod's internal HTTP API, where call-signaling forwards WebRTC offers." } }
     }
   }
 }

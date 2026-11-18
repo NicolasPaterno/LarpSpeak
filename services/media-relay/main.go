@@ -24,7 +24,9 @@ import (
 	"github.com/larpspeak/media-relay/internal/adapter/dynamo"
 	"github.com/larpspeak/media-relay/internal/adapter/httpapi"
 	"github.com/larpspeak/media-relay/internal/adapter/messaging"
+	"github.com/larpspeak/media-relay/internal/adapter/pubkey"
 	"github.com/larpspeak/media-relay/internal/adapter/udp"
+	"github.com/larpspeak/media-relay/internal/adapter/webrtc"
 	"github.com/larpspeak/media-relay/internal/app"
 	"github.com/larpspeak/media-relay/internal/config"
 )
@@ -75,11 +77,25 @@ func main() {
 	go r.Failover(ctx)
 	go udp.Serve(ctx, conn, r, log)
 
+	// Browser audio: WebRTC on its own UDP port (DTLS/STUN would be ambiguous on the legacy UDP port).
+	rtcConn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: cfg.WebRTCPort})
+	if err != nil {
+		log.Error("webrtc udp listen", "err", err)
+		os.Exit(1)
+	}
+	sfu, err := webrtc.New(rtcConn, os.Getenv("RELAY_HOST"), r, log)
+	if err != nil {
+		log.Error("webrtc setup", "err", err)
+		os.Exit(1)
+	}
+	var key pubkey.Key
+	go key.Load(ctx, cfg.SignalingURL, log)
+
 	mux := http.NewServeMux()
-	httpapi.Register(mux, r, hostname)
+	httpapi.Register(mux, r, hostname, sfu, key.Get)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
 	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()); _ = conn.Close() }()
-	log.Info("listening", "http", srv.Addr, "udp", cfg.UDPPort, "host", r.Host,
+	log.Info("listening", "http", srv.Addr, "udp", cfg.UDPPort, "webrtc", cfg.WebRTCPort, "host", r.Host,
 		"latency", cfg.Latency.String(), "failureRate", cfg.FailureRate, "participantTimeout", cfg.ParticipantTimeout.String())
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Error("server stopped", "err", err)

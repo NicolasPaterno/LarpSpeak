@@ -199,7 +199,10 @@ func (r *Relay) allocate(ctx context.Context, e domain.Envelope, ref callRef) er
 
 	ss := domain.Session{CallID: ref.CallID, RelayID: uuid.New().String(), Host: r.Host, Port: r.Cfg.UDPPort, Participants: ref.Participants,
 		State: domain.StateAllocated, Owner: r.ID}
-	out, err := message(r.Cfg.RelayResults, "RelayAllocated", ref.CallID, map[string]any{"callId": ss.CallID, "relayId": ss.RelayID, "host": ss.Host, "port": ss.Port})
+	out, err := message(r.Cfg.RelayResults, "RelayAllocated", ref.CallID, map[string]any{
+		"callId": ss.CallID, "relayId": ss.RelayID, "host": ss.Host, "port": ss.Port,
+		"signalAddr": r.ProbeAddr, // where call-signaling sends WebRTC offers for this call
+	})
 	if err != nil {
 		return err
 	}
@@ -274,6 +277,52 @@ func (r *Relay) Forward(ctx context.Context, callID, userID string, from *net.UD
 	}
 	r.mu.Unlock()
 	return targets
+}
+
+// Touch authorizes a packet from userID in callID and records that the user is
+// alive. WebRTC peers call it on every RTP/RTCP packet (a muted browser still
+// sends silent Opus frames), so the participant timeout works as for UDP.
+func (r *Relay) Touch(callID, userID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ls := r.live[callID]
+	if ls == nil || !ls.participants[userID] {
+		return false
+	}
+	ls.lastSeen[userID] = time.Now()
+	return true
+}
+
+// Admit checks that this pod relays callID and userID may talk in it, reading
+// DynamoDB right away (a WebRTC offer can arrive before /adopt or before the
+// ParticipantJoined event reached this pod).
+func (r *Relay) Admit(ctx context.Context, callID, userID string) error {
+	r.mu.Lock()
+	ls := r.live[callID]
+	ok := ls != nil && ls.participants[userID]
+	r.mu.Unlock()
+	if ok {
+		return nil
+	}
+	ss, err := r.Sessions.Get(ctx, callID)
+	if err != nil {
+		return err
+	}
+	if ss == nil || ss.State != domain.StateAllocated || ss.Owner != r.ID {
+		return domain.ErrNotOwner
+	}
+	if !slices.Contains(ss.Participants, userID) {
+		return domain.ErrNotIn
+	}
+	r.mu.Lock()
+	if ls := r.live[callID]; ls != nil {
+		ls.add(userID)
+		r.mu.Unlock()
+		return nil
+	}
+	r.mu.Unlock()
+	r.track(*ss)
+	return nil
 }
 
 // Sweep reports participants whose client stopped sending packets for
