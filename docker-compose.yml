@@ -53,6 +53,19 @@ services:
       REFRESH_TTL_S: ${REFRESH_TTL_S:-604800}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
 
+  web:
+    build: ./web
+    ports: ["8080:80"]
+    environment:
+      SIGNALING_URL: http://call-signaling:8080
+    depends_on: [call-signaling]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   media-relay:
     <<: *after-init
     build: ./services/media-relay

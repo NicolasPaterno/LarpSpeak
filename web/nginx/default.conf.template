@@ -1,0 +1,33 @@
+# ${SIGNALING_URL} comes from the environment (nginx image runs envsubst on templates).
+server {
+    listen 80;
+    root /usr/share/nginx/html;
+
+    location = /health {
+        default_type application/json;
+        return 200 '{"status":"ok","service":"web"}';
+    }
+
+    # Re-resolve the upstream through Docker's DNS: a recreated call-signaling
+    # container gets a new IP, and a stale one may now belong to another service.
+    resolver 127.0.0.11 valid=5s ipv6=off;
+
+    location /api/ {
+        set $signaling ${SIGNALING_URL};
+        rewrite ^/api/(.*)$ /$1 break;   # /api/calls -> /calls
+        proxy_pass $signaling;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;        # SSE frames must reach the browser immediately
+        proxy_read_timeout 1h;      # long-lived notification stream
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location / {
+        try_files $uri /index.html; # client-side routes like /c/<callId>
+    }
+}
