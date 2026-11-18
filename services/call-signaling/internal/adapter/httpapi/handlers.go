@@ -31,6 +31,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /calls/{id}/join", h.handleJoin)
 	mux.HandleFunc("POST /calls/{id}/leave", h.handleLeave)
 	mux.HandleFunc("POST /calls/{id}/invite", h.handleInvite)
+	mux.HandleFunc("POST /calls/{id}/webrtc", h.handleWebRTC)
+	mux.HandleFunc("POST /calls/{id}/state", h.handleState)
 	h.registerAuth(mux)
 }
 
@@ -99,6 +101,7 @@ func (h *Handler) handleJoin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"callId": c.ID, "relayHost": c.RelayHost, "relayPort": c.RelayPort,
 			"participants": c.Participants, "taken": c.Taken, "capacity": c.Capacity,
+			"muted": orEmpty(c.Muted), "deafened": orEmpty(c.Deafened),
 		})
 	}
 }
@@ -162,11 +165,72 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 	case c == nil:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "call not found"})
 	default:
-		if c.Participants == nil {
-			c.Participants = []string{} // DynamoDB drops empty sets; clients expect a list
-		}
+		// DynamoDB drops empty sets; clients expect lists.
+		c.Participants, c.Muted, c.Deafened = orEmpty(c.Participants), orEmpty(c.Muted), orEmpty(c.Deafened)
 		writeJSON(w, http.StatusOK, c)
 	}
+}
+
+// handleWebRTC: POST /calls/{id}/webrtc {sdp} -> 200 {sdp}. The offer goes to
+// the relay pod that owns the call; 409 "relay not ready" means retry shortly.
+func (h *Handler) handleWebRTC(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.user(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		SDP string `json:"sdp"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<17)).Decode(&req); err != nil || req.SDP == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp is required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancel()
+	answer, err := h.Svc.Offer(ctx, r.PathValue("id"), user, req.SDP)
+	switch {
+	case errors.Is(err, domain.ErrNotActive), errors.Is(err, domain.ErrNotIn), errors.Is(err, domain.ErrRelayNotReady):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		h.Svc.Log.Error("webrtc offer failed", "correlationId", r.PathValue("id"), "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
+	default:
+		writeJSON(w, http.StatusOK, map[string]string{"sdp": answer})
+	}
+}
+
+// handleState: POST /calls/{id}/state {muted, deafened} -> 202; others get participant_state.
+func (h *Handler) handleState(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.user(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Muted    bool `json:"muted"`
+		Deafened bool `json:"deafened"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "muted and deafened are required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	switch err := h.Svc.SetState(ctx, r.PathValue("id"), user, req.Muted, req.Deafened); {
+	case errors.Is(err, domain.ErrNotIn):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+	case err != nil:
+		h.Svc.Log.Error("state update failed", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "try again"})
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"muted": req.Muted, "deafened": req.Deafened})
+	}
+}
+
+func orEmpty(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

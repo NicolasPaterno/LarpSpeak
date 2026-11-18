@@ -25,6 +25,7 @@ import (
 	"github.com/larpspeak/call-signaling/internal/adapter/dynamo"
 	"github.com/larpspeak/call-signaling/internal/adapter/httpapi"
 	"github.com/larpspeak/call-signaling/internal/adapter/messaging"
+	"github.com/larpspeak/call-signaling/internal/adapter/relayhttp"
 	"github.com/larpspeak/call-signaling/internal/adapter/secrets"
 	"github.com/larpspeak/call-signaling/internal/adapter/sse"
 	"github.com/larpspeak/call-signaling/internal/app"
@@ -65,6 +66,8 @@ func main() {
 	log.Info("jwt key loaded", "secretId", cfg.JWTKeySecret)
 	auth := &app.Auth{St: st, Key: ed25519.NewKeyFromSeed(seed), AccessTTL: cfg.AccessTTL, RefreshTTL: cfg.RefreshTTL,
 		Iter: domain.PwIterations, Log: log, NowFn: time.Now}
+	svc.Media = &relayhttp.Client{HTTP: &http.Client{Timeout: 5 * time.Second},
+		Mint: func(user, callID string) string { return auth.Mint(user, domain.TokenJoin, callID, time.Minute) }}
 
 	go messaging.RelayOutbox(ctx, st, b, cfg.TopicArn)
 	go b.Consume(ctx, cfg.RelayResults, svc.OnRelayResult)

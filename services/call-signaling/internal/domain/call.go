@@ -20,13 +20,14 @@ const (
 )
 
 var (
-	ErrRoomFull     = errors.New("call is full")
-	ErrNotActive    = errors.New("call is not active")
-	ErrAlreadyIn    = errors.New("user already in call")
-	ErrNotIn        = errors.New("user not in call")
-	ErrDuplicate    = errors.New("message already processed")
-	ErrStateChanged = errors.New("call state changed concurrently")
-	ErrSeatLost     = errors.New("seat update rejected") // join condition failed: full, ended, or already inside
+	ErrRoomFull      = errors.New("call is full")
+	ErrNotActive     = errors.New("call is not active")
+	ErrAlreadyIn     = errors.New("user already in call")
+	ErrNotIn         = errors.New("user not in call")
+	ErrDuplicate     = errors.New("message already processed")
+	ErrStateChanged  = errors.New("call state changed concurrently")
+	ErrSeatLost      = errors.New("seat update rejected")   // join condition failed: full, ended, or already inside
+	ErrRelayNotReady = errors.New("relay not ready, retry") // WebRTC offer during allocation or failover
 )
 
 // Call is a voice channel: up to Capacity participants talk at the same time.
@@ -44,6 +45,9 @@ type Call struct {
 	RelayID      string   `json:"relayId,omitempty" dynamodbav:"relayId,omitempty"`
 	RelayHost    string   `json:"relayHost,omitempty" dynamodbav:"relayHost,omitempty"`
 	RelayPort    int      `json:"relayPort,omitempty" dynamodbav:"relayPort,omitempty"`
+	RelaySignal  string   `json:"-" dynamodbav:"relaySignal,omitempty"` // owning relay pod's internal HTTP addr (WebRTC offers)
+	Muted        []string `json:"muted" dynamodbav:"muted,stringset,omitempty"`
+	Deafened     []string `json:"deafened" dynamodbav:"deafened,stringset,omitempty"`
 	CreatedAt    int64    `json:"createdAt" dynamodbav:"createdAt"` // unix ms
 	StartedAt    int64    `json:"startedAt,omitempty" dynamodbav:"startedAt,omitempty"`
 	EndedAt      int64    `json:"endedAt,omitempty" dynamodbav:"endedAt,omitempty"`

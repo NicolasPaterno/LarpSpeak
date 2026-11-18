@@ -25,7 +25,9 @@ type CallStore interface {
 	// Activate: PENDING -> ACTIVE with c.Relay*/StartedAt, plus CallStarted. ErrStateChanged if not PENDING.
 	Activate(ctx context.Context, msgID string, c domain.Call, out domain.Outgoing) error
 	// MoveRelay points an ACTIVE call to a new relay pod. ErrStateChanged if not ACTIVE.
-	MoveRelay(ctx context.Context, msgID, id, host string, port int) error
+	MoveRelay(ctx context.Context, msgID, id, host string, port int, signal string) error
+	// SetState stores a participant's mute/deafen flags. ErrNotIn if not an active participant.
+	SetState(ctx context.Context, id, user string, muted, deafened bool) error
 	// Fail (compensation): PENDING -> FAILED, seats freed, plus CallFailed. ErrStateChanged if not PENDING.
 	Fail(ctx context.Context, msgID, id, reason string, out domain.Outgoing) error
 	// Join takes a seat (R2). ErrSeatLost: full, ended or already inside. ErrStateChanged: user claimed by another call.
@@ -34,6 +36,12 @@ type CallStore interface {
 	Leave(ctx context.Context, msgID string, c *domain.Call, user string, last bool, now int64, out ...domain.Outgoing) error
 	// Ack marks msgID processed, emitting out with it.
 	Ack(ctx context.Context, msgID string, out ...domain.Outgoing) error
+}
+
+// MediaSignaler forwards a browser's WebRTC offer to the relay pod at addr.
+// Errors: ErrRelayNotReady (pod does not own the call yet), ErrNotIn.
+type MediaSignaler interface {
+	Offer(ctx context.Context, addr, callID, userID, sdp string) (string, error)
 }
 
 // Notifier pushes an event to a connected user.

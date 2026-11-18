@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Hub pushes notifications ("you're being called", call active/failed) to
@@ -59,10 +60,17 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, userID string) {
 	w.Header().Set("Cache-Control", "no-cache")
 	fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
+	ping := time.NewTicker(20 * time.Second) // keeps idle streams alive through proxies
+	defer ping.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ping.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case frame := <-ch:
 			if _, err := w.Write(frame); err != nil {
 				return

@@ -23,6 +23,7 @@ type Service struct {
 	Log   *slog.Logger
 	Cfg   config.Config
 	NowFn func() time.Time
+	Media MediaSignaler // WebRTC offers to the owning relay pod
 }
 
 type relayResult struct {
@@ -31,6 +32,7 @@ type relayResult struct {
 	RelayID string `json:"relayId"`
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
+	Signal  string `json:"signalAddr"` // optional (v1 additive): owning pod's HTTP addr
 	Reason  string `json:"reason"`
 }
 
@@ -95,7 +97,7 @@ func (s *Service) OnRelayResult(ctx context.Context, e domain.Envelope) error {
 
 	case e.Type == "RelayMoved" && c.Status == domain.StatusActive:
 		// The relay replica died and another one adopted the call: point everyone to it.
-		if err := s.St.MoveRelay(ctx, msgID, c.ID, r.Host, r.Port); err != nil {
+		if err := s.St.MoveRelay(ctx, msgID, c.ID, r.Host, r.Port, r.Signal); err != nil {
 			return err
 		}
 		s.Log.Warn("relay moved", "correlationId", c.ID, "host", r.Host, "port", r.Port)
@@ -124,7 +126,7 @@ func (s *Service) OnRelayResult(ctx context.Context, e domain.Envelope) error {
 		if err != nil {
 			return err
 		}
-		c.RelayID, c.RelayHost, c.RelayPort, c.StartedAt = r.RelayID, r.Host, r.Port, now
+		c.RelayID, c.RelayHost, c.RelayPort, c.RelaySignal, c.StartedAt = r.RelayID, r.Host, r.Port, r.Signal, now
 		if err := s.St.Activate(ctx, msgID, *c, out); err != nil {
 			return err
 		}
@@ -309,6 +311,40 @@ func (s *Service) Invite(ctx context.Context, id, from, to string) error {
 	}
 	s.Hub.Notify(to, "incoming_call", map[string]any{"callId": id, "from": from})
 	s.Log.Info("participant invited", "correlationId", id, "userId", from, "inviteeId", to)
+	return nil
+}
+
+// Offer sends a participant's WebRTC offer to the relay pod that owns the call
+// and returns its answer. The browser retries ErrRelayNotReady (allocation or
+// failover in progress).
+func (s *Service) Offer(ctx context.Context, id, user, sdp string) (string, error) {
+	c, err := s.St.Get(ctx, id)
+	switch {
+	case err != nil:
+		return "", err
+	case c == nil || c.Status != domain.StatusActive:
+		return "", domain.ErrNotActive
+	case !c.Has(user):
+		return "", domain.ErrNotIn
+	case c.RelaySignal == "":
+		return "", domain.ErrRelayNotReady
+	}
+	return s.Media.Offer(ctx, c.RelaySignal, id, user, sdp)
+}
+
+// SetState stores mute/deafen so the others see the indicators, then tells
+// every participant (SSE participant_state).
+func (s *Service) SetState(ctx context.Context, id, user string, muted, deafened bool) error {
+	if err := s.St.SetState(ctx, id, user, muted, deafened); err != nil {
+		return err
+	}
+	c, err := s.St.Get(ctx, id)
+	if err != nil || c == nil {
+		return err
+	}
+	for _, u := range c.Participants {
+		s.Hub.Notify(u, "participant_state", map[string]any{"callId": id, "userId": user, "muted": muted, "deafened": deafened})
+	}
 	return nil
 }
 
