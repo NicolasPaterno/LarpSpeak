@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -70,7 +71,8 @@ func main() {
 		Mint: func(user, callID string) string { return auth.Mint(user, domain.TokenJoin, callID, time.Minute) }}
 
 	go messaging.RelayOutbox(ctx, st, b, cfg.TopicArn)
-	go b.Consume(ctx, cfg.RelayResults, svc.OnRelayResult)
+	var consumers sync.WaitGroup
+	consumers.Go(func() { b.Consume(ctx, cfg.RelayResults, svc.OnRelayResult) })
 	go svc.SweepTimeouts(ctx)
 
 	mux := http.NewServeMux()
@@ -83,4 +85,6 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+	consumers.Wait() // let the last long poll finish and its messages be handled (see Bus.Consume)
+	log.Info("stopped")
 }

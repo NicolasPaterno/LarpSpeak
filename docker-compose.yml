@@ -6,6 +6,7 @@ x-aws: &aws
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
 
 x-after-init: &after-init
+  stop_grace_period: 20s # > SQS long poll (10s): consumers finish the last poll before exiting
   depends_on:
     infra-init:
       condition: service_completed_successfully

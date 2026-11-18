@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -71,8 +72,9 @@ func main() {
 	}()
 
 	go messaging.RelayOutbox(ctx, st, b)
-	go b.Consume(ctx, cfg.RelayRequests, r.OnRelayRequest) // competing consumers across replicas (R4)
-	go b.Consume(ctx, cfg.CallEvents, r.OnCallEvent)
+	var consumers sync.WaitGroup
+	consumers.Go(func() { b.Consume(ctx, cfg.RelayRequests, r.OnRelayRequest) }) // competing consumers across replicas (R4)
+	consumers.Go(func() { b.Consume(ctx, cfg.CallEvents, r.OnCallEvent) })
 	go r.Sweep(ctx)
 	go r.Failover(ctx)
 	go udp.Serve(ctx, conn, r, log)
@@ -101,6 +103,8 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+	consumers.Wait() // let the last long poll finish and its messages be handled (see Bus.Consume)
+	log.Info("stopped")
 }
 
 // advertisedHost is where participants send audio: RELAY_HOST if set, else this container's IP.
