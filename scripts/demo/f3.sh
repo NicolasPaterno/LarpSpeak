@@ -28,3 +28,5 @@ info "efeitos: $active | duplicatas ignoradas: $dups"
 $AWS dynamodb get-item --table-name signaling-processed --key "{\"pk\":{\"S\":\"$msg\"}}" --query Item.pk.S | sed 's/^/   processed: /'
 [ "$active" = 1 ] && [ "$dups" = 4 ] || fail "esperado 1 efeito e 4 duplicatas"
 ok "F3: 5 entregas, 1 efeito"
+# The forged RelayAllocated has no relay session, so no relay would ever time the call out: leave it.
+api "ana-$RUN" POST "/calls/$id/leave" >/dev/null
