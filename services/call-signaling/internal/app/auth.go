@@ -99,7 +99,7 @@ func (a *Auth) Refresh(ctx context.Context, refresh string) (Tokens, error) {
 	}
 	if old.Status == domain.RefreshUsed {
 		if now.Sub(time.UnixMilli(old.UsedAt)) < reuseGrace {
-			return Tokens{}, domain.ErrTokenInvalid
+			return Tokens{}, domain.ErrRefreshRace
 		}
 		a.Log.Warn("refresh token reuse detected", "userId", old.UserID, "family", old.Family)
 		if err := a.St.RevokeFamily(ctx, old.Family); err != nil {
@@ -109,6 +109,9 @@ func (a *Auth) Refresh(ctx context.Context, refresh string) (Tokens, error) {
 	}
 	next, rt := a.newRefresh(old.UserID, old.Family)
 	if err := a.St.Rotate(ctx, *old, rt, now.UnixMilli()); err != nil {
+		if errors.Is(err, domain.ErrTokenInvalid) { // lost the rotation to a concurrent refresh
+			return Tokens{}, domain.ErrRefreshRace
+		}
 		return Tokens{}, err
 	}
 	return Tokens{Access: a.Mint(old.UserID, domain.TokenAccess, "", a.AccessTTL), Refresh: next, UserID: old.UserID}, nil
@@ -138,5 +141,6 @@ func hashToken(t string) string { h := sha256.Sum256([]byte(t)); return hex.Enco
 
 // IsAuthError reports errors that mean "log in again" rather than "server broken".
 func IsAuthError(err error) bool {
-	return errors.Is(err, domain.ErrTokenInvalid) || errors.Is(err, domain.ErrTokenReused) || errors.Is(err, domain.ErrBadCredentials)
+	return errors.Is(err, domain.ErrTokenInvalid) || errors.Is(err, domain.ErrTokenReused) ||
+		errors.Is(err, domain.ErrBadCredentials) || errors.Is(err, domain.ErrRefreshRace)
 }

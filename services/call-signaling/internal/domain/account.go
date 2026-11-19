@@ -12,6 +12,9 @@ var (
 	ErrTaken          = errors.New("username taken")
 	ErrBadCredentials = errors.New("invalid credentials")
 	ErrTokenReused    = errors.New("refresh token reused")
+	// ErrRefreshRace: another tab rotated this refresh token a moment ago. The
+	// browser already holds the newer cookie, so the answer must not clear it.
+	ErrRefreshRace = errors.New("refresh token just rotated")
 
 	usernameRe = regexp.MustCompile(`^[a-z0-9_-]{3,32}$`)
 )

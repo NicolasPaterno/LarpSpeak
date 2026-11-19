@@ -133,6 +133,10 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) answerTokens(w http.ResponseWriter, t app.Tokens, err error) {
 	switch {
+	case errors.Is(err, domain.ErrRefreshRace):
+		// Do not touch the cookie: this answer can reach the browser after the
+		// winning tab's Set-Cookie, and clearing it would log both tabs out.
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "refresh token just rotated, retry"})
 	case app.IsAuthError(err):
 		h.setRefresh(w, "", -1)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})

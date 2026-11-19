@@ -104,7 +104,7 @@ func TestAuthFlow(t *testing.T) {
 	if err != nil || t2.Refresh == t1.Refresh {
 		t.Fatalf("rotate: %v", err)
 	}
-	if _, err := a.Refresh(ctx, t1.Refresh); !errors.Is(err, domain.ErrTokenInvalid) { // inside grace: no revoke
+	if _, err := a.Refresh(ctx, t1.Refresh); !errors.Is(err, domain.ErrRefreshRace) { // inside grace: no revoke, cookie kept
 		t.Fatalf("grace reuse: %v", err)
 	}
 	t3, err := a.Refresh(ctx, t2.Refresh) // session still alive after grace hit
