@@ -269,3 +269,75 @@ func TestRedistributeKeepsDeadNodeWhenMoveFails(t *testing.T) {
 		t.Fatalf("ops %v, want %v", st.ops, want)
 	}
 }
+
+// Admit decides whether this pod accepts a browser's WebRTC offer. It reads
+// DynamoDB right away, because the offer can arrive before /adopt or before the
+// ParticipantJoined event reached this pod.
+func TestAdmit(t *testing.T) {
+	ctx := context.Background()
+	st := &fakeStore{sessions: map[string]domain.Session{
+		"other":    {CallID: "other", State: domain.StateAllocated, Owner: "pod-b", Participants: []string{"ana"}},
+		"released": {CallID: "released", State: domain.StateReleased, Owner: "pod-a", Participants: []string{"ana"}},
+		"mine":     {CallID: "mine", State: domain.StateAllocated, Owner: "pod-a", Participants: []string{"ana"}},
+		"live":     {CallID: "live", State: domain.StateAllocated, Owner: "pod-a", Participants: []string{"ana", "bob"}},
+	}}
+	r := newRelay(st)
+	r.track(domain.Session{CallID: "live", Participants: []string{"ana"}}) // bob joined via another replica: not here yet
+
+	for _, c := range []struct {
+		call, user string
+		want       error
+	}{
+		{"missing", "ana", domain.ErrNotOwner},  // no session at all
+		{"other", "ana", domain.ErrNotOwner},    // owned by another pod (e.g. moved by failover)
+		{"released", "ana", domain.ErrNotOwner}, // call already over
+		{"mine", "mallory", domain.ErrNotIn},    // this pod's call, but not a participant
+		{"mine", "ana", nil},                    // this pod's call, not loaded yet: picked up
+		{"live", "ana", nil},                    // already live here
+		{"live", "bob", nil},                    // live, participant only in DynamoDB so far
+	} {
+		if err := r.Admit(ctx, c.call, c.user); !errors.Is(err, c.want) {
+			t.Errorf("Admit(%s, %s) = %v, want %v", c.call, c.user, err, c.want)
+		}
+	}
+	if !r.Touch("mine", "ana") {
+		t.Error("admitted call was not picked up")
+	}
+	if !r.Touch("live", "bob") {
+		t.Error("participant read from DynamoDB was not added to the live session")
+	}
+	if r.Touch("mine", "mallory") || r.Touch("other", "ana") {
+		t.Error("refused offers must not leave the user able to send audio")
+	}
+}
+
+// Touch authorizes every WebRTC packet and refreshes the participant's last
+// sign of life, which the participant timeout (Sweep) relies on.
+func TestTouch(t *testing.T) {
+	r := newRelay(&fakeStore{})
+	if r.Touch("c1", "ana") {
+		t.Fatal("call not relayed here was accepted")
+	}
+	r.track(domain.Session{CallID: "c1", Participants: []string{"ana", "bob"}})
+	old := time.Now().Add(-time.Hour)
+	r.live["c1"].lastSeen["ana"] = old
+
+	if !r.Touch("c1", "ana") {
+		t.Fatal("participant refused")
+	}
+	if !r.live["c1"].lastSeen["ana"].After(old) {
+		t.Fatal("Touch did not refresh lastSeen")
+	}
+	if r.Touch("c1", "mallory") {
+		t.Fatal("non-participant accepted")
+	}
+
+	r.live["c1"].remove("bob") // ParticipantLeft applied
+	if r.Touch("c1", "bob") {
+		t.Fatal("user who left still accepted")
+	}
+	r.untrack("c1") // relay released (call ended) or call moved away
+	if r.Touch("c1", "ana") {
+		t.Fatal("released call still accepted")
+	}
+}
