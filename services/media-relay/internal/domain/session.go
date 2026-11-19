@@ -14,6 +14,8 @@ const (
 var (
 	ErrDuplicate = errors.New("message already processed")
 	ErrReleased  = errors.New("relay already released")
+	ErrNotOwner  = errors.New("call is not relayed by this pod")
+	ErrNotIn     = errors.New("user is not a participant")
 )
 
 // Session is one relay, keyed by callId (one relay per call).

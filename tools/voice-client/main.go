@@ -37,6 +37,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -63,6 +64,7 @@ func main() {
 	mute := flag.Bool("mute", false, "start muted")
 	deafen := flag.Bool("deafen", false, "start deafened: hear nothing and send silence")
 	loss := flag.Float64("loss", 0, "drop this fraction of received packets on purpose (e.g. 0.1)")
+	password := flag.String("password", envOr("LARPSPEAK_PASSWORD", "larpspeak-demo"), "account password (registered on first use)")
 	flag.Parse()
 	if *user == "" || (!*create && *join == "" && !*listen) {
 		flag.Usage()
@@ -73,7 +75,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	api := &client{base: strings.TrimRight(*server, "/"), user: *user}
+	api := &client{base: strings.TrimRight(*server, "/"), user: *user, password: *password}
+	if _, err := api.token(ctx); err != nil {
+		log.Fatalf("login: %v", err)
+	}
 	invites := make(chan string, 1)
 	gone := make(chan string, 4)    // call ids we were removed from (ended, failed, moved)
 	moved := make(chan callInfo, 4) // relay failover: new address for a call
@@ -362,7 +367,48 @@ func controls(ctx context.Context, st *state, api *client, callID string, noMic 
 
 // --- call-signaling API ---
 
-type client struct{ base, user string }
+type client struct {
+	base, user, password string
+	mu                   sync.Mutex
+	tok                  string
+	tokAt                time.Time
+}
+
+// token logs in (registering the account on first use) and reuses the access
+// token for 4 minutes; the server issues 5-minute tokens.
+func (c *client) token(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tok != "" && time.Since(c.tokAt) < 4*time.Minute {
+		return c.tok, nil
+	}
+	creds, _ := json.Marshal(map[string]string{"username": c.user, "password": c.password})
+	post := func(path string) (*http.Response, error) {
+		req, _ := http.NewRequestWithContext(ctx, "POST", c.base+path, bytes.NewReader(creds))
+		return http.DefaultClient.Do(req)
+	}
+	if resp, err := post("/auth/register"); err == nil {
+		resp.Body.Close() // 201 new account, 409 already exists: both fine
+	}
+	resp, err := post("/auth/login")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct{ AccessToken string }
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil || out.AccessToken == "" {
+		return "", fmt.Errorf("login as %q failed: HTTP %d (wrong -password?)", c.user, resp.StatusCode)
+	}
+	c.tok, c.tokAt = out.AccessToken, time.Now()
+	return c.tok, nil
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
 
 func (c *client) do(ctx context.Context, method, path string, body any, out any) (int, error) {
 	var r io.Reader
@@ -374,6 +420,11 @@ func (c *client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return 0, err
 	}
+	tok, err := c.token(ctx)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, err
@@ -392,7 +443,7 @@ func (c *client) do(ctx context.Context, method, path string, body any, out any)
 // create asks for a call (202) and polls until the relay is ready (R3 from the client side).
 func (c *client) create(ctx context.Context, invited []string, maxP int) (callInfo, error) {
 	var info callInfo
-	body := map[string]any{"callerId": c.user, "calleeIds": invited, "maxParticipants": maxP}
+	body := map[string]any{"calleeIds": invited, "maxParticipants": maxP}
 	if _, err := c.do(ctx, "POST", "/calls", body, &info); err != nil {
 		return info, err
 	}
@@ -416,28 +467,34 @@ func (c *client) create(ctx context.Context, invited []string, maxP int) (callIn
 
 func (c *client) join(ctx context.Context, callID string) (callInfo, error) {
 	var info callInfo
-	_, err := c.do(ctx, "POST", "/calls/"+callID+"/join", map[string]string{"userId": c.user}, &info)
+	_, err := c.do(ctx, "POST", "/calls/"+callID+"/join", nil, &info)
 	return info, err
 }
 
 func (c *client) invite(callID, user string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := c.do(ctx, "POST", "/calls/"+callID+"/invite", map[string]string{"userId": c.user, "inviteeId": user}, nil)
+	_, err := c.do(ctx, "POST", "/calls/"+callID+"/invite", map[string]string{"inviteeId": user}, nil)
 	return err
 }
 
 func (c *client) leave(callID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := c.do(ctx, "POST", "/calls/"+callID+"/leave", map[string]string{"userId": c.user}, nil)
+	_, err := c.do(ctx, "POST", "/calls/"+callID+"/leave", nil, nil)
 	return err
 }
 
 // notifications prints the user's SSE events and forwards invitations.
 func (c *client) notifications(ctx context.Context, invites, gone chan<- string, moved chan<- callInfo) {
 	for ctx.Err() == nil {
-		req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/users/"+c.user+"/notifications", nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/notifications", nil)
+		tok, err := c.token(ctx)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			time.Sleep(2 * time.Second)

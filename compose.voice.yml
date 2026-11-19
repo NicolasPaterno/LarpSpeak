@@ -6,7 +6,7 @@ services:
   media-relay:
     deploy:
       replicas: 1
-    ports: ["40000:40000/udp"]
+    ports: ["40000:40000/udp", "50000:50000/udp"] # legacy UDP audio, WebRTC (browsers)
     environment:
       RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to this machine's LAN IP}
 
@@ -16,10 +16,11 @@ services:
       service: media-relay
     deploy:
       replicas: 1
-    ports: ["40001:40001/udp"]
+    ports: ["40001:40001/udp", "50001:50001/udp"]
     environment:
       RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to this machine's LAN IP}
       UDP_PORT: "40001"
+      WEBRTC_UDP_PORT: "50001"
     depends_on:
       infra-init:
         condition: service_completed_successfully

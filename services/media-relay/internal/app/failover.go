@@ -210,7 +210,7 @@ func (r *Relay) redistribute(ctx context.Context, dead []string, alive []domain.
 			}
 		}
 		out, err := message(r.Cfg.RelayResults, "RelayMoved", old.CallID, map[string]any{
-			"callId": old.CallID, "relayId": old.RelayID, "host": to.Host, "port": to.Port,
+			"callId": old.CallID, "relayId": old.RelayID, "host": to.Host, "port": to.Port, "signalAddr": to.Addr,
 		})
 		if err != nil {
 			continue

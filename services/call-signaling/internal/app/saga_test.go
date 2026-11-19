@@ -97,7 +97,9 @@ func (f *fakeStore) Activate(_ context.Context, msgID string, c domain.Call, out
 	f.calls[c.ID] = &c
 	return nil
 }
-func (f *fakeStore) MoveRelay(_ context.Context, msgID, id, host string, port int) error {
+func (f *fakeStore) SetState(context.Context, string, string, bool, bool) error { return nil }
+
+func (f *fakeStore) MoveRelay(_ context.Context, msgID, id, host string, port int, _ string) error {
 	return f.write("MoveRelay", msgID)
 }
 func (f *fakeStore) Fail(_ context.Context, msgID, id, _ string, out domain.Outgoing) error {

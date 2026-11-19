@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Hub pushes notifications ("you're being called", call active/failed) to
@@ -32,9 +33,8 @@ func (h *Hub) Notify(userID, event string, data any) {
 	}
 }
 
-// Serve streams a user's notifications: GET /users/{userId}/notifications.
-func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("userId")
+// Serve streams the notifications of an already authenticated user.
+func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, userID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -60,10 +60,17 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
+	ping := time.NewTicker(20 * time.Second) // keeps idle streams alive through proxies
+	defer ping.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ping.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case frame := <-ch:
 			if _, err := w.Write(frame); err != nil {
 				return

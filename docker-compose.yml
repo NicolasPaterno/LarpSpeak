@@ -6,6 +6,7 @@ x-aws: &aws
   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
 
 x-after-init: &after-init
+  stop_grace_period: 20s # > SQS long poll (10s): consumers finish the last poll before exiting
   depends_on:
     infra-init:
       condition: service_completed_successfully
@@ -46,6 +47,26 @@ services:
       USERS_TABLE: signaling-users
       OUTBOX_TABLE: signaling-outbox
       PROCESSED_TABLE: signaling-processed
+      ACCOUNTS_TABLE: signaling-accounts
+      REFRESH_TABLE: signaling-refresh
+      JWT_KEY_SECRET: larpspeak/jwt-key
+      ACCESS_TOKEN_TTL_S: ${ACCESS_TOKEN_TTL_S:-300}
+      REFRESH_TTL_S: ${REFRESH_TTL_S:-604800}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+
+  web:
+    build: ./web
+    ports: ["8080:80", "8443:443"] # 8443 = HTTPS when web/certs exists (make certs); mic on other machines needs it
+    volumes: ["./web/certs:/etc/nginx/certs:ro"]
+    environment:
+      SIGNALING_URL: http://call-signaling:8080
+    depends_on: [call-signaling]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
   media-relay:
     <<: *after-init
@@ -59,6 +80,8 @@ services:
       RELAY_FAILURE_RATE: ${RELAY_FAILURE_RATE:-0.0}
       PARTICIPANT_TIMEOUT_MS: ${PARTICIPANT_TIMEOUT_MS:-15000}
       UDP_PORT: "40000"
+      WEBRTC_UDP_PORT: "50000"
+      SIGNALING_URL: http://call-signaling:8080
       RELAY_REQUESTS_QUEUE: relay-requests
       RELAY_RESULTS_QUEUE: relay-results
       CALL_EVENTS_QUEUE: media-relay-call-events

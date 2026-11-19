@@ -35,7 +35,7 @@ for q in media-relay-call-events audit-vault-call-events; do
 done
 
 # Database per service.
-for t in signaling-calls signaling-users signaling-outbox signaling-processed \
+for t in signaling-calls signaling-users signaling-outbox signaling-processed signaling-accounts signaling-refresh \
          relay-sessions relay-nodes relay-outbox relay-processed audit-records audit-processed; do table "$t"; done
 
 # Object storage + secret for audio encryption.
@@ -44,4 +44,8 @@ echo "bucket larpspeak-audio"
 aws secretsmanager describe-secret --secret-id larpspeak/audio-key >/dev/null 2>&1 || \
   aws secretsmanager create-secret --name larpspeak/audio-key --secret-string "$(head -c 32 /dev/urandom | base64)" >/dev/null
 echo "secret larpspeak/audio-key"
+# Ed25519 seed for JWTs: read only by call-signaling, the only service that creates tokens.
+aws secretsmanager describe-secret --secret-id larpspeak/jwt-key >/dev/null 2>&1 || \
+  aws secretsmanager create-secret --name larpspeak/jwt-key --secret-string "$(head -c 32 /dev/urandom | base64)" >/dev/null
+echo "secret larpspeak/jwt-key"
 echo "infra ready"

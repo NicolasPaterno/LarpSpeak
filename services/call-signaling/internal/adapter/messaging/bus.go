@@ -60,12 +60,20 @@ func (b *backoff) fail() {
 }
 func (b *backoff) ok() { b.d = 0 }
 
-// Consume long-polls a queue forever. A message is deleted only after it was
-// handled (or recognised as a duplicate); anything else is redelivered and, after
-// maxReceiveCount attempts, moved to the DLQ by SQS (R1, F2, F4).
+// Consume long-polls a queue until ctx is cancelled. A message is deleted only
+// after it was handled (or recognised as a duplicate); anything else is
+// redelivered and, after maxReceiveCount attempts, moved to the DLQ (R1, F2, F4).
+//
+// Graceful stop: cancelling ctx stops the loop between polls, but a poll in
+// flight is NOT cancelled. The broker may already have handed it a message;
+// aborting would leave that message invisible for the whole visibility timeout
+// (30s), long enough for the saga timeout to give up on a healthy call. So the
+// last poll finishes and its messages are handled and deleted before returning.
 func (b *Bus) Consume(ctx context.Context, queue string, handle func(context.Context, domain.Envelope) error) {
+	stop := ctx
+	ctx = context.WithoutCancel(ctx)
 	var bo backoff
-	for ctx.Err() == nil {
+	for stop.Err() == nil {
 		url, err := b.queueURL(ctx, queue)
 		if err != nil {
 			b.log.Warn("broker unreachable, retrying", "queue", queue, "err", err)

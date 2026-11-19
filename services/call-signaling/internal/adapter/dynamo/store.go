@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
@@ -148,13 +149,13 @@ func (s *Store) Create(ctx context.Context, c domain.Call, out domain.Outgoing) 
 // Activate moves a PENDING call to ACTIVE with its relay (c.Relay*, c.StartedAt) and emits CallStarted.
 func (s *Store) Activate(ctx context.Context, msgID string, c domain.Call, out domain.Outgoing) error {
 	fields := map[string]types.AttributeValue{"relayId": str(c.RelayID), "relayHost": str(c.RelayHost),
-		"relayPort": num(int64(c.RelayPort)), "startedAt": num(c.StartedAt)}
+		"relayPort": num(int64(c.RelayPort)), "relaySignal": str(c.RelaySignal), "startedAt": num(c.StartedAt)}
 	return s.transition(ctx, msgID, c.ID, domain.StatusPending, domain.StatusActive, fields, out)
 }
 
 // MoveRelay points an ACTIVE call to the relay pod that adopted it.
-func (s *Store) MoveRelay(ctx context.Context, msgID, id, host string, port int) error {
-	fields := map[string]types.AttributeValue{"relayHost": str(host), "relayPort": num(int64(port))}
+func (s *Store) MoveRelay(ctx context.Context, msgID, id, host string, port int, signal string) error {
+	fields := map[string]types.AttributeValue{"relayHost": str(host), "relayPort": num(int64(port)), "relaySignal": str(signal)}
 	return s.transition(ctx, msgID, id, domain.StatusActive, domain.StatusActive, fields)
 }
 
@@ -185,6 +186,39 @@ func (s *Store) Leave(ctx context.Context, msgID string, c *domain.Call, user st
 	failed, err := s.commit(ctx, msgID, items...)
 	if failed(0) {
 		return domain.ErrStateChanged // counter moved under us
+	}
+	return err
+}
+
+// SetState adds/removes the user in the call's muted and deafened sets. Sets
+// make it idempotent; it is an HTTP command, not a consumer, so no marker.
+func (s *Store) SetState(ctx context.Context, id, user string, muted, deafened bool) error {
+	var add, del []string
+	for name, on := range map[string]bool{"muted": muted, "deafened": deafened} {
+		if on {
+			add = append(add, name+" :u")
+		} else {
+			del = append(del, name+" :u")
+		}
+	}
+	expr := ""
+	if len(add) > 0 {
+		expr += "ADD " + strings.Join(add, ", ") + " "
+	}
+	if len(del) > 0 {
+		expr += "DELETE " + strings.Join(del, ", ")
+	}
+	_, err := s.DB.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                 &s.Cfg.CallsTable,
+		Key:                       key(id),
+		UpdateExpression:          aws.String(expr),
+		ConditionExpression:       aws.String("#s = :active AND contains(participants, :uid)"),
+		ExpressionAttributeNames:  map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{":u": set(user), ":uid": str(user), ":active": str(domain.StatusActive)},
+	})
+	var ccf *types.ConditionalCheckFailedException
+	if errors.As(err, &ccf) {
+		return domain.ErrNotIn
 	}
 	return err
 }
@@ -277,7 +311,7 @@ func (s *Store) leave(callID, user string, takenNow int, lastOne bool, now int64
 	return types.TransactWriteItem{Update: &types.Update{
 		TableName:                 aws.String(s.Cfg.CallsTable),
 		Key:                       key(callID),
-		UpdateExpression:          aws.String(expr + " DELETE participants :u"),
+		UpdateExpression:          aws.String(expr + " DELETE participants :u, muted :u, deafened :u"), // rejoin starts unmuted
 		ConditionExpression:       aws.String("#s = :active AND contains(participants, :uid) AND taken = :n"),
 		ExpressionAttributeNames:  map[string]string{"#s": "status"},
 		ExpressionAttributeValues: vals,

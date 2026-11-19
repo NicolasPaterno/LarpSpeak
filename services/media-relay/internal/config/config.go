@@ -10,6 +10,8 @@ import (
 type Config struct {
 	Port               string
 	UDPPort            int
+	WebRTCPort         int           // one UDP port for every browser peer (ICE UDP mux)
+	SignalingURL       string        // call-signaling base URL, for the token public key
 	Latency            time.Duration // R5: simulated slowness of relay allocation
 	FailureRate        float64       // R5: probability that an allocation fails
 	ParticipantTimeout time.Duration // a participant sending no packets this long is gone
@@ -41,6 +43,7 @@ func Load() (Config, error) {
 		NodesTable:     need("NODES_TABLE"),
 		OutboxTable:    need("OUTBOX_TABLE"),
 		ProcessedTable: need("PROCESSED_TABLE"),
+		SignalingURL:   need("SIGNALING_URL"),
 	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("missing env vars: %v", missing)
@@ -48,6 +51,9 @@ func Load() (Config, error) {
 	var err error
 	if c.UDPPort, err = strconv.Atoi(envOr("UDP_PORT", "40000")); err != nil {
 		return c, fmt.Errorf("UDP_PORT must be an integer")
+	}
+	if c.WebRTCPort, err = strconv.Atoi(envOr("WEBRTC_UDP_PORT", "50000")); err != nil {
+		return c, fmt.Errorf("WEBRTC_UDP_PORT must be an integer")
 	}
 	if c.FailureRate, err = strconv.ParseFloat(envOr("RELAY_FAILURE_RATE", "0"), 64); err != nil || c.FailureRate < 0 || c.FailureRate > 1 {
 		return c, fmt.Errorf("RELAY_FAILURE_RATE must be between 0 and 1")

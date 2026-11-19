@@ -10,9 +10,10 @@ relays 2 RELAY_LATENCY_MS=2000
 step "F6: chamada criada; o relay vai responder com o broker fora do ar"
 id=$(new_call "ana-$RUN" 0 "bob-$RUN"); info "callId=$id"
 sleep 0.5
+carl=$(token "carl-$RUN") # log in before the broker (and DynamoDB) goes away
 step "docker compose pause ministack (SQS, SNS, DynamoDB fora por 30s)"
 docker compose pause ministack >/dev/null
-code=$(curl -s -o /dev/null -w '%{http_code}' -XPOST "$API/calls" -d "{\"callerId\":\"carl-$RUN\"}")
+code=$(curl -s -o /dev/null -w '%{http_code}' -XPOST -H "Authorization: Bearer $carl" "$API/calls" -d '{}')
 info "POST /calls durante a queda: HTTP $code (falha rápida, cliente tenta depois)"
 for s in 30 20 10; do info "${s}s..."; sleep 10; done
 docker compose unpause ministack >/dev/null

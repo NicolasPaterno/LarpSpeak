@@ -10,7 +10,7 @@ signaling RELAY_TIMEOUT_MS=3000
 relays 2 RELAY_LATENCY_MS=6000
 id=$(new_call "ana-$RUN" 0 "bob-$RUN"); info "callId=$id"
 wait_status "$id" FAILED 15
-curl -s "$API/calls/$id" | jq '{status, reason}'
+call_json "$id" | jq '{status, reason}'
 ok "saga expirou e compensou a chamada"
 
 step "Aguardando a resposta atrasada do relay..."
