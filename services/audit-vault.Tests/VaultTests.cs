@@ -14,6 +14,24 @@ public class EnvelopeTests
         Assert.Equal(1, e.Version);
     }
 
+    [Theory] // Go marshals time.Time as RFC 3339 with up to 9 fractional digits
+    [InlineData("2026-11-22T19:54:11.443817800Z")]
+    [InlineData("2026-11-22T19:54:11.4Z")]
+    [InlineData("2026-11-22T16:54:11.443817-03:00")]
+    public void Accepts_the_timestamps_the_go_services_write(string at)
+    {
+        Assert.True(Envelope.TryParse(T.Msg("m1", "CallStarted", "c1", "{}", at), out var e, out var err), err);
+        Assert.Equal(new DateTimeOffset(2026, 11, 22, 19, 54, 11, TimeSpan.Zero).Date, e!.OccurredAt.UtcDateTime.Date);
+    }
+
+    [Fact] // the vault stores times with "O" and reads them back with Parse: no precision or offset surprises
+    public void Stored_timestamps_round_trip()
+    {
+        Envelope.TryParse(T.Msg("m1", "CallStarted", "c1", "{}", "2026-11-22T19:54:11.443817800Z"), out var e, out _);
+        var s = e!.OccurredAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(e.OccurredAt, DateTimeOffset.Parse(s, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     [Theory]
     [InlineData("not json")]
     [InlineData("[]")]
