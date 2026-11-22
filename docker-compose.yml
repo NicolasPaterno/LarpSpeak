@@ -100,5 +100,6 @@ services:
       CALL_EVENTS_QUEUE: audit-vault-call-events
       AUDIT_TABLE: audit-records
       PROCESSED_TABLE: audit-processed
+      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-larpspeak-audit-demo} # Bearer token for GET /audit/*; /health is open
       AUDIO_BUCKET: larpspeak-audio
       AUDIO_KEY_SECRET: larpspeak/audio-key
