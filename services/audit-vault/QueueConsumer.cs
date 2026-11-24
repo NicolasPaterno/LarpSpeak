@@ -42,7 +42,7 @@ public sealed class SqsQueue(IAmazonSQS sqs, string queueName) : IMessageQueue
 /// loop: it backs off and keeps trying, so the service survives a broker outage without
 /// a manual restart (R6, F6).
 /// </summary>
-public sealed class QueueConsumer(IMessageQueue queue, MessageProcessor processor, ILogger<QueueConsumer> log)
+public sealed class QueueConsumer(IMessageQueue queue, IMessageHandler processor, ILogger<QueueConsumer> log)
 {
     public TimeSpan FirstBackoff { get; init; } = TimeSpan.FromMilliseconds(250);
     public TimeSpan MaxBackoff { get; init; } = TimeSpan.FromSeconds(5);

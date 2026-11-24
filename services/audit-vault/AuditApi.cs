@@ -29,6 +29,32 @@ public static class AuditApi
             var trail = await store.GetTrailAsync(callId, ct);
             return trail is null ? Results.NotFound(new { error = "no audit records for this call" }) : Results.Ok(View(trail));
         });
+        if (!cfg.AudioEnabled) return;
+
+        // Recordings: one decrypted Ogg Opus file per participant. Same token as the rest of /audit.
+        audit.MapGet("/calls/{callId}/audio", async (AudioExporter audio, string callId, CancellationToken ct) =>
+        {
+            if (!AudioChunk.IsSafeId(callId)) return Results.BadRequest(new { error = "invalid callId" });
+            var tracks = await audio.TracksAsync(callId, ct);
+            return tracks.Count == 0
+                ? Results.NotFound(new { error = "no recordings for this call" })
+                : Results.Ok(tracks.Select(t => new { t.UserId, t.Chunks, t.Bytes, t.StartedAt, t.LastChunkAt, Url = $"/audit/calls/{callId}/audio/{t.UserId}" }));
+        });
+
+        audit.MapGet("/calls/{callId}/audio/{userId}", async (AudioExporter audio, string callId, string userId, CancellationToken ct) =>
+        {
+            if (!AudioChunk.IsSafeId(callId) || !AudioChunk.IsSafeId(userId)) return Results.BadRequest(new { error = "invalid callId or userId" });
+            byte[]? ogg;
+            try { ogg = await audio.ExportOggAsync(callId, userId, ct); }
+            catch (System.Security.Cryptography.CryptographicException)
+            {
+                // wrong key, or a chunk was altered/moved: never serve audio that fails authentication
+                return Results.Json(new { error = "recording failed authentication" }, statusCode: StatusCodes.Status500InternalServerError);
+            }
+            return ogg is null
+                ? Results.NotFound(new { error = "no recording for this participant" })
+                : Results.File(ogg, "audio/ogg", $"{callId}-{userId}.opus");
+        });
     }
 
     internal static bool TokenOk(string header, string expected)

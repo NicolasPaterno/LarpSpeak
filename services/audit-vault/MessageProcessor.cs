@@ -12,7 +12,7 @@ public enum Outcome
     Failed,
 }
 
-public sealed class MessageProcessor(IAuditStore store, TimeProvider clock, ILogger<MessageProcessor> log)
+public sealed class MessageProcessor(IAuditStore store, TimeProvider clock, ILogger<MessageProcessor> log) : IMessageHandler
 {
     public async Task<Outcome> HandleAsync(string body, CancellationToken ct)
     {
