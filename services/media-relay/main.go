@@ -90,6 +90,14 @@ func main() {
 		log.Error("webrtc setup", "err", err)
 		os.Exit(1)
 	}
+	// Call recording: Opus packets of every browser go to audit-vault as AudioChunk events,
+	// outside the audio path (see app.Recorder). Off unless AUDIO_CHUNKS_QUEUE is set.
+	if cfg.AudioChunksQueue != "" {
+		rec := app.NewRecorder(b, cfg.AudioChunksQueue, log, cfg.AudioChunk)
+		sfu.SetRecorder(rec)
+		consumers.Go(func() { rec.Run(ctx) }) // on shutdown it flushes buffered audio before Wait returns
+		log.Info("call recording on", "queue", cfg.AudioChunksQueue, "chunk", cfg.AudioChunk.String())
+	}
 	var key pubkey.Key
 	go key.Load(ctx, cfg.SignalingURL, log)
 

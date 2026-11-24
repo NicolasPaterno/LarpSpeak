@@ -24,6 +24,13 @@ type Gate interface {
 	Touch(callID, userID string) bool
 }
 
+// Recorder receives a copy of every Opus packet a browser sends (see app.Recorder).
+// Record must not block: it runs on the audio path.
+type Recorder interface {
+	Record(callID, userID string, ts uint32, payload []byte)
+	Flush(callID, userID string)
+}
+
 // SFU keeps the browser peers of the calls this pod relays.
 //
 // Fan-out without renegotiation: the browser offers one audio m-line per
@@ -35,6 +42,7 @@ type SFU struct {
 	api  *webrtc.API
 	gate Gate
 	log  *slog.Logger
+	rec  Recorder // nil = calls are not recorded
 
 	mu    sync.Mutex
 	calls map[string]map[string]*peer // callId -> userId -> peer
@@ -77,6 +85,9 @@ func New(conn net.PacketConn, host string, gate Gate, log *slog.Logger) (*SFU, e
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(ir), webrtc.WithSettingEngine(se))
 	return &SFU{api: api, gate: gate, log: log, calls: map[string]map[string]*peer{}}, nil
 }
+
+// SetRecorder turns call recording on. Call it before the first offer arrives.
+func (s *SFU) SetRecorder(r Recorder) { s.rec = r }
 
 // Offer answers a browser's SDP offer (ICE already gathered: no trickle). A
 // second offer from the same user replaces the old peer, so retries after a
@@ -164,6 +175,9 @@ func (s *SFU) Offer(ctx context.Context, callID, userID, sdp string) (string, er
 	s.mu.Unlock()
 	if old != nil {
 		_ = old.pc.Close() // drop() ignores it: no longer the current peer
+		if s.rec != nil {
+			s.rec.Flush(callID, userID) // the new peer starts a new RTP timeline: cut the chunk here
+		}
 	}
 	s.log.Info("webrtc peer connected", "correlationId", callID, "userId", userID, "slots", len(p.slots), "replaced", old != nil)
 	return pc.LocalDescription().SDP, nil
@@ -210,6 +224,9 @@ func (s *SFU) uplink(p *peer, remote *webrtc.TrackRemote, recv *webrtc.RTPReceiv
 			}
 		}
 		s.mu.Unlock()
+		if s.rec != nil { // the gate already accepted this participant: record every packet, muted or not
+			s.rec.Record(p.call, p.user, pkt.Timestamp, pkt.Payload)
+		}
 		for _, t := range out {
 			_ = t.WriteRTP(pkt)
 		}
@@ -224,6 +241,9 @@ func (s *SFU) drop(p *peer) {
 		return
 	}
 	delete(s.calls[p.call], p.user)
+	if s.rec != nil {
+		s.rec.Flush(p.call, p.user) // keep the last seconds of audio
+	}
 	for _, o := range s.calls[p.call] {
 		if sl := o.slotFor(p.user); sl != nil {
 			sl.owner = ""
