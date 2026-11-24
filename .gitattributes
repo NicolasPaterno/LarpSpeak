@@ -1,0 +1,6 @@
+# Files that run inside Linux containers or under make/bash must stay LF, even on Windows checkouts.
+*.sh text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.template text eol=lf
+*.yml text eol=lf
