@@ -24,6 +24,7 @@ queue relay-requests
 queue relay-results
 queue media-relay-call-events
 queue audit-vault-call-events
+queue audio-chunks # media-relay -> audit-vault: encrypted call recordings
 
 topic_arn=$(aws sns create-topic --name call-events --query TopicArn)
 for q in media-relay-call-events audit-vault-call-events; do
@@ -41,6 +42,18 @@ for t in signaling-calls signaling-users signaling-outbox signaling-processed si
 # Object storage + secret for audio encryption.
 aws s3api head-bucket --bucket larpspeak-audio 2>/dev/null || aws s3api create-bucket --bucket larpspeak-audio >/dev/null
 echo "bucket larpspeak-audio"
+# Call recordings are encrypted twice: audit-vault seals every chunk with AES-256-GCM
+# (key: larpspeak/audio-key) and the bucket encrypts whatever lands in it by default.
+# The bucket is never public. Both calls are idempotent; an emulator that lacks one of
+# these APIs only costs a warning (the application-level encryption does not depend on them).
+aws s3api put-bucket-encryption --bucket larpspeak-audio --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"},"BucketKeyEnabled":true}]}' >/dev/null \
+  && echo "bucket larpspeak-audio: default encryption AES256" \
+  || echo "WARN: could not enable default bucket encryption (SSE)"
+aws s3api put-public-access-block --bucket larpspeak-audio --public-access-block-configuration \
+  'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true' >/dev/null \
+  && echo "bucket larpspeak-audio: public access blocked" \
+  || echo "WARN: could not block public access on the bucket"
 aws secretsmanager describe-secret --secret-id larpspeak/audio-key >/dev/null 2>&1 || \
   aws secretsmanager create-secret --name larpspeak/audio-key --secret-string "$(head -c 32 /dev/urandom | base64)" >/dev/null
 echo "secret larpspeak/audio-key"

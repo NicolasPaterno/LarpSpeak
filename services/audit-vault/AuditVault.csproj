@@ -5,4 +5,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AuditVault.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.1.0.3" />
+    <PackageReference Include="AWSSDK.S3" Version="4.1.2" />
+    <PackageReference Include="AWSSDK.SecretsManager" Version="4.1.1.2" />
+    <PackageReference Include="AWSSDK.SQS" Version="4.1.0.2" />
+  </ItemGroup>
 </Project>

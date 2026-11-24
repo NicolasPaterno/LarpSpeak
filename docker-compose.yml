@@ -89,6 +89,8 @@ services:
       NODES_TABLE: relay-nodes
       OUTBOX_TABLE: relay-outbox
       PROCESSED_TABLE: relay-processed
+      AUDIO_CHUNKS_QUEUE: audio-chunks # call recording (browser audio) -> audit-vault; unset = off
+      AUDIO_CHUNK_MS: ${AUDIO_CHUNK_MS:-5000}
 
   audit-vault:
     <<: *after-init
@@ -100,5 +102,7 @@ services:
       CALL_EVENTS_QUEUE: audit-vault-call-events
       AUDIT_TABLE: audit-records
       PROCESSED_TABLE: audit-processed
+      AUDIO_CHUNKS_QUEUE: audio-chunks
+      AUDIT_API_TOKEN: ${AUDIT_API_TOKEN:-larpspeak-audit-demo} # Bearer token for GET /audit/*; /health is open
       AUDIO_BUCKET: larpspeak-audio
       AUDIO_KEY_SECRET: larpspeak/audio-key

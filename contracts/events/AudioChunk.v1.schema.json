@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://larpspeak.local/contracts/events/AudioChunk.v1.schema.json",
+  "title": "AudioChunk v1",
+  "description": "Fact: a few seconds of one participant's audio (Opus packets exactly as the browser sent them). Published by the media-relay pod that owns the call; audit-vault encrypts it (AES-256-GCM) and stores it in S3. Delivery is best effort: chunks wait in memory while the broker is down and are dropped (and counted) when the buffer is full, so recording never delays the call. Channel: SQS audio-chunks (media-relay -> audit-vault).",
+  "allOf": [{ "$ref": "../envelope.schema.json" }],
+  "properties": {
+    "type": { "const": "AudioChunk" },
+    "version": { "const": 1 },
+    "payload": {
+      "type": "object",
+      "required": ["callId", "userId", "startMs", "durationMs", "frames"],
+      "properties": {
+        "callId": { "type": "string", "description": "Same as correlationId." },
+        "userId": { "type": "string" },
+        "startMs": { "type": "integer", "description": "Unix ms of the first frame, on the relay pod's clock. Orders the chunks of one participant." },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "frames": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["ts", "data"],
+            "properties": {
+              "ts": { "type": "integer", "minimum": 0, "description": "RTP timestamp (48 kHz clock)." },
+              "data": { "type": "string", "contentEncoding": "base64", "description": "One Opus packet." }
+            }
+          }
+        }
+      }
+    }
+  }
+}

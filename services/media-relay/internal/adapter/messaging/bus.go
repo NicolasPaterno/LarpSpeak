@@ -143,3 +143,9 @@ func (b *Bus) publish(ctx context.Context, queue, body string) error {
 	_, err = b.sqs.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: &url, MessageBody: &body})
 	return err
 }
+
+// Send publishes one message to a queue. It lets the audio recorder use the same
+// queue lookup (and its retry-on-broker-down behaviour) as the outbox relay.
+func (b *Bus) Send(ctx context.Context, queue, body string) error {
+	return b.publish(ctx, queue, body)
+}

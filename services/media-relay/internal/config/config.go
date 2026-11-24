@@ -22,6 +22,8 @@ type Config struct {
 	NodesTable         string
 	OutboxTable        string
 	ProcessedTable     string
+	AudioChunksQueue   string        // queue of AudioChunk events for audit-vault; empty = recording off
+	AudioChunk         time.Duration // length of each recorded audio chunk
 }
 
 // Load reads the service configuration from environment variables.
@@ -44,6 +46,8 @@ func Load() (Config, error) {
 		OutboxTable:    need("OUTBOX_TABLE"),
 		ProcessedTable: need("PROCESSED_TABLE"),
 		SignalingURL:   need("SIGNALING_URL"),
+		// optional: without it the relay does not record calls
+		AudioChunksQueue: os.Getenv("AUDIO_CHUNKS_QUEUE"),
 	}
 	if len(missing) > 0 {
 		return c, fmt.Errorf("missing env vars: %v", missing)
@@ -63,6 +67,9 @@ func Load() (Config, error) {
 	}
 	if c.ParticipantTimeout, err = millis("PARTICIPANT_TIMEOUT_MS", "15000"); err != nil {
 		return c, err
+	}
+	if c.AudioChunk, err = millis("AUDIO_CHUNK_MS", "5000"); err != nil || c.AudioChunk < time.Second {
+		return c, fmt.Errorf("AUDIO_CHUNK_MS must be an integer >= 1000 (ms)")
 	}
 	return c, nil
 }
