@@ -23,10 +23,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<MessageProcessor>();
 
 // call events -> audit trail
-builder.Services.AddHostedService(sp => new ConsumerService(new QueueConsumer(
-    new SqsQueue(sp.GetRequiredService<IAmazonSQS>(), cfg.CallEventsQueue),
-    sp.GetRequiredService<MessageProcessor>(),
-    sp.GetRequiredService<ILogger<QueueConsumer>>())));
+builder.Services.AddQueueConsumer<MessageProcessor>(cfg.CallEventsQueue);
 
 if (cfg.AudioEnabled)
 {
@@ -46,10 +43,7 @@ if (cfg.AudioEnabled)
     builder.Services.AddSingleton<AudioExporter>();
 
     // audio chunks -> encrypted objects in S3 (competing consumers: several replicas may share the queue, R4)
-    builder.Services.AddHostedService(sp => new ConsumerService(new QueueConsumer(
-        new SqsQueue(sp.GetRequiredService<IAmazonSQS>(), cfg.AudioQueue!),
-        sp.GetRequiredService<AudioProcessor>(),
-        sp.GetRequiredService<ILogger<QueueConsumer>>())));
+    builder.Services.AddQueueConsumer<AudioProcessor>(cfg.AudioQueue!);
 }
 
 var app = builder.Build();
