@@ -99,3 +99,24 @@ public sealed class ConsumerService(QueueConsumer consumer) : BackgroundService
 {
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => consumer.RunAsync(stoppingToken);
 }
+
+public static class ConsumerRegistration
+{
+    /// <summary>
+    /// Runs one <see cref="QueueConsumer"/> for <paramref name="queueName"/> with <typeparamref name="THandler"/>.
+    /// Registered as a plain IHostedService singleton on purpose: AddHostedService uses TryAddEnumerable,
+    /// which silently drops a second ConsumerService (same implementation type), so only the first
+    /// queue would ever be consumed.
+    /// </summary>
+    public static IServiceCollection AddQueueConsumer<THandler>(this IServiceCollection services, string queueName)
+        where THandler : IMessageHandler =>
+        services.AddSingleton<IHostedService>(sp =>
+        {
+            var log = sp.GetRequiredService<ILogger<QueueConsumer>>();
+            log.LogInformation("consumer started for queue {Queue} handler {Handler}", queueName, typeof(THandler).Name);
+            return new ConsumerService(new QueueConsumer(
+                new SqsQueue(sp.GetRequiredService<IAmazonSQS>(), queueName),
+                sp.GetRequiredService<THandler>(),
+                log));
+        });
+}
