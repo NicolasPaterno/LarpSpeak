@@ -28,6 +28,7 @@ public sealed class DynamoAuditStore(IAmazonDynamoDB db, VaultConfig cfg) : IAud
                 ["receivedAt"] = S(e.ReceivedAt.ToString(Fmt, CultureInfo.InvariantCulture)),
                 ["payload"] = S(e.Payload),
                 ["sha256"] = S(e.Sha256),
+                ["envelope"] = S(e.RawEnvelope ?? ""), // original message, so sha256 can be re-checked on read
             }
         };
         var request = new TransactWriteItemsRequest
@@ -119,7 +120,8 @@ public sealed class DynamoAuditStore(IAmazonDynamoDB db, VaultConfig cfg) : IAud
                 m["messageId"].S, callId, m["type"].S, int.Parse(m["version"].N, CultureInfo.InvariantCulture),
                 DateTimeOffset.Parse(m["occurredAt"].S, CultureInfo.InvariantCulture),
                 DateTimeOffset.Parse(m["receivedAt"].S, CultureInfo.InvariantCulture),
-                m["payload"].S, m["sha256"].S));
+                m["payload"].S, m["sha256"].S,
+                m.TryGetValue("envelope", out var raw) && !string.IsNullOrEmpty(raw.S) ? raw.S : null));
         return CallTrail.Build(callId, events);
     }
 

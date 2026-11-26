@@ -170,6 +170,46 @@ public class TrailTests
     }
 
     [Fact]
+    public void Present_tracks_departures_while_participants_keeps_everyone()
+    {
+        var t = CallTrail.Build("c1",
+        [
+            Ev("1", "CallStarted", """{"callId":"c1","participants":["ana","bob"],"capacity":3}""", "2026-11-22T10:00:00Z"),
+            Ev("2", "ParticipantJoined", """{"callId":"c1","userId":"carl"}""", "2026-11-22T10:00:01Z"),
+            Ev("3", "ParticipantLeft", """{"callId":"c1","userId":"bob"}""", "2026-11-22T10:00:02Z"),
+            Ev("4", "ParticipantTimedOut", """{"callId":"c1","userId":"carl"}""", "2026-11-22T10:00:03Z"),
+            Ev("5", "ParticipantJoined", """{"callId":"c1","userId":"bob"}""", "2026-11-22T10:00:04Z"),
+        ]);
+        Assert.Equal(CallStatus.Active, t.Status);
+        Assert.Equal(["ana", "bob", "carl"], t.Participants);
+        Assert.Equal(["ana", "bob"], t.Present);
+    }
+
+    [Theory]
+    [InlineData("CallEnded", """{"callId":"c1","durationMs":1,"reason":"last-left"}""")]
+    [InlineData("CallFailed", """{"callId":"c1","reason":"relay timeout"}""")]
+    public void Nobody_is_present_after_the_call_ends(string type, string payload)
+    {
+        var t = CallTrail.Build("c1",
+        [
+            Ev("1", "CallStarted", """{"callId":"c1","participants":["ana","bob"],"capacity":2}""", "2026-11-22T10:00:00Z"),
+            Ev("2", type, payload, "2026-11-22T10:00:05Z"),
+        ]);
+        Assert.Empty(t.Present);
+        Assert.Equal(["ana", "bob"], t.Participants);
+    }
+
+    [Fact]
+    public void Verified_when_the_stored_envelope_matches_its_sha256()
+    {
+        var e = Ev("1", "CallStarted", "{}", "2026-11-22T10:00:00Z");
+        Assert.True(e.Verified);
+        Assert.False((e with { RawEnvelope = e.RawEnvelope!.Replace("CallStarted", "CallEnded") }).Verified); // tampered
+        Assert.False((e with { RawEnvelope = null }).Verified); // old entry stored without the envelope
+        Assert.False((e with { Sha256 = new string('0', 64) }).Verified);
+    }
+
+    [Fact]
     public void Record_has_a_stable_sha256_of_the_original_message()
     {
         var a = Ev("1", "CallStarted", "{}", "2026-11-22T10:00:00Z");
@@ -190,12 +230,17 @@ public class ApiTests
     public void Token_check(string header, bool ok) => Assert.Equal(ok, AuditApi.TokenOk(header, "secret"));
 
     [Fact]
-    public void Config_requires_queue_and_tables()
+    public void Config_requires_queue_tables_and_api_token()
     {
         var ex = Assert.Throws<InvalidOperationException>(() => VaultConfig.Load(_ => null));
         Assert.Contains("CALL_EVENTS_QUEUE", ex.Message);
-        var cfg = VaultConfig.Load(k => k switch { "CALL_EVENTS_QUEUE" => "q", "AUDIT_TABLE" => "a", "PROCESSED_TABLE" => "p", _ => null });
+        Assert.Contains("AUDIT_API_TOKEN", ex.Message);
+        // fail closed: everything else set, token missing -> startup fails
+        var noToken = Assert.Throws<InvalidOperationException>(() =>
+            VaultConfig.Load(k => k switch { "CALL_EVENTS_QUEUE" => "q", "AUDIT_TABLE" => "a", "PROCESSED_TABLE" => "p", _ => null }));
+        Assert.Equal("missing environment variables: AUDIT_API_TOKEN", noToken.Message);
+        var cfg = VaultConfig.Load(k => k switch { "CALL_EVENTS_QUEUE" => "q", "AUDIT_TABLE" => "a", "PROCESSED_TABLE" => "p", "AUDIT_API_TOKEN" => "t", _ => null });
         Assert.Equal("us-east-1", cfg.Region);
-        Assert.Null(cfg.ApiToken);
+        Assert.Equal("t", cfg.ApiToken);
     }
 }

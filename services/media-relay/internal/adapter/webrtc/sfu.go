@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -59,6 +60,28 @@ type slot struct {
 	tr    *webrtc.RTPTransceiver
 	track *webrtc.TrackLocalStaticRTP
 	owner string // user whose audio this slot carries; "" = free
+
+	// Outgoing RTP timeline. The browser's jitter buffer drops a random jump in
+	// seq/timestamp on the same SSRC (new owner, or same owner after a reload),
+	// so a new source is shifted to continue where the slot left off.
+	src    uint32 // SSRC of the source currently written to this slot
+	sent   bool
+	seq    uint16 // last sent
+	ts     uint32
+	seqOff uint16
+	tsOff  uint32
+}
+
+// rewrite maps a source packet's seq/ts onto the slot's continuous timeline.
+// Caller holds s.mu.
+func (sl *slot) rewrite(ssrc uint32, seq uint16, ts uint32) (uint16, uint32) {
+	if sl.sent && ssrc != sl.src { // continue at last+1 and one 20 ms Opus frame (960 @ 48 kHz) later
+		sl.seqOff = sl.seq + 1 - seq
+		sl.tsOff = sl.ts + 960 - ts
+	}
+	sl.src, sl.sent = ssrc, true
+	sl.seq, sl.ts = seq+sl.seqOff, ts+sl.tsOff
+	return sl.seq, sl.ts
 }
 
 // New builds the pion API: Opus only, every ICE candidate on one UDP port
@@ -205,7 +228,12 @@ func (s *SFU) uplink(p *peer, remote *webrtc.TrackRemote, recv *webrtc.RTPReceiv
 			_ = p.pc.Close()
 			return
 		}
-		var out []*webrtc.TrackLocalStaticRTP
+		type send struct {
+			t   *webrtc.TrackLocalStaticRTP
+			seq uint16
+			ts  uint32
+		}
+		var out []send
 		s.mu.Lock()
 		if s.calls[p.call][p.user] != p { // replaced by a newer offer
 			s.mu.Unlock()
@@ -215,20 +243,25 @@ func (s *SFU) uplink(p *peer, remote *webrtc.TrackRemote, recv *webrtc.RTPReceiv
 			if u == p.user {
 				continue
 			}
-			if sl := o.slotFor(p.user); sl != nil {
-				out = append(out, sl.track)
-			} else if sl := o.freeSlot(); sl != nil {
+			sl := o.slotFor(p.user)
+			if sl == nil {
+				if sl = o.freeSlot(); sl == nil {
+					continue
+				}
 				sl.owner = p.user
-				out = append(out, sl.track)
 				s.sendMeta(o)
 			}
+			seq, ts := sl.rewrite(pkt.SSRC, pkt.SequenceNumber, pkt.Timestamp)
+			out = append(out, send{sl.track, seq, ts})
 		}
 		s.mu.Unlock()
 		if s.rec != nil { // the gate already accepted this participant: record every packet, muted or not
 			s.rec.Record(p.call, p.user, pkt.Timestamp, pkt.Payload)
 		}
-		for _, t := range out {
-			_ = t.WriteRTP(pkt)
+		for _, o := range out { // own header per slot (WriteRTP rewrites SSRC); payload shared
+			cp := rtp.Packet{Header: pkt.Header, Payload: pkt.Payload}
+			cp.SequenceNumber, cp.Timestamp = o.seq, o.ts
+			_ = o.t.WriteRTP(&cp)
 		}
 	}
 }

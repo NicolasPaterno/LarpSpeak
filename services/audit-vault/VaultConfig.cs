@@ -7,7 +7,7 @@ public sealed record VaultConfig(
     string CallEventsQueue,
     string AuditTable,
     string ProcessedTable,
-    string? ApiToken,
+    string ApiToken,
     string? AudioQueue = null,
     string? AudioBucket = null,
     string? AudioKeySecret = null)
@@ -33,7 +33,7 @@ public sealed record VaultConfig(
             Need("CALL_EVENTS_QUEUE"),
             Need("AUDIT_TABLE"),
             Need("PROCESSED_TABLE"),
-            Opt("AUDIT_API_TOKEN"),
+            Need("AUDIT_API_TOKEN"), // fail closed: the audit API never runs without a token
             audioQueue,
             audioQueue is null ? null : Need("AUDIO_BUCKET"),
             audioQueue is null ? null : Need("AUDIO_KEY_SECRET"));

@@ -25,12 +25,12 @@ func (s *Store) Ping(ctx context.Context, n domain.Node) error {
 }
 
 func (s *Store) Nodes(ctx context.Context) ([]domain.Node, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.NodesTable, ConsistentRead: aws.Bool(true)})
+	items, err := s.scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.NodesTable, ConsistentRead: aws.Bool(true)})
 	if err != nil {
 		return nil, err
 	}
 	var ns []domain.Node
-	for _, item := range out.Items {
+	for _, item := range items {
 		var n domain.Node
 		if err := attributevalue.UnmarshalMap(item, &n); err != nil {
 			return nil, err
