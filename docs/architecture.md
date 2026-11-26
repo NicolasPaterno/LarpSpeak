@@ -7,8 +7,7 @@ o que cada peça faz, por que foi feita assim e o que acontece quando algo falha
 
 ```
                     SNS call-events (fan-out)
-call-signaling ──┐        │
-media-relay ─────┴──► ────┼──► SQS media-relay-call-events ──► media-relay
+call-signaling ──────────►┬──► SQS media-relay-call-events ──► media-relay
                           └──► SQS audit-vault-call-events ──► audit-vault ──► DynamoDB audit-records
                                                                           └──► DynamoDB audit-processed
 navegador ──WebRTC/Opus──► media-relay (SFU)
@@ -18,8 +17,11 @@ navegador ──WebRTC/Opus──► media-relay (SFU)
                                                     ▲
                                        Secrets Manager larpspeak/audio-key
 
-Leitura: GET /audit/... (token Bearer) ──► audit-vault ──► DynamoDB / S3 ──► JSON ou .opus
+Leitura: GET /audit/... (token Bearer) ──► audit-vault (2 réplicas, portas 8083-8084) ──► DynamoDB / S3 ──► JSON ou .opus
 ```
+
+Só o call-signaling publica no tópico `call-events`. O media-relay só envia para filas SQS
+(`relay-results` e `audio-chunks`).
 
 O audit-vault tem duas responsabilidades:
 
@@ -36,14 +38,14 @@ O código é o mesmo da AWS real: só muda `AWS_ENDPOINT_URL`.
 | Código | Significado | Como o audit-vault atende |
 |---|---|---|
 | R1 | Idempotência: efeito aplicado uma vez só | Marcador `messageId` em `audit-processed`; na gravação, chave S3 determinística |
-| R2 | Controle de concorrência | Escrita condicional (`attribute_not_exists`) no DynamoDB |
-| R4 | Escala horizontal | Consumidores concorrentes: várias réplicas leem a mesma fila |
+| R2 | Controle de concorrência | Não se aplica: R2 fica no call-signaling (vaga na chamada). No vault, o marcador usa `attribute_not_exists` para duas réplicas não gravarem o mesmo efeito |
+| R4 | Escala horizontal | Consumidores concorrentes: 2 réplicas por padrão (`AUDIT_VAULT_REPLICAS`) leem as duas filas |
 | R6 | Sobreviver à queda do broker | Laço de consumo com backoff; recurso lido sob demanda, nunca só no início |
 | F2 | Serviço morre no meio | Mensagem só é apagada depois de gravada, então é reentregue |
 | F3 | Mensagem duplicada | Mesmo `messageId` produz um único efeito |
 | F4 | Mensagem venenosa | Não é apagada; após 5 recebimentos vai para a DLQ |
 | F6 | Broker fora do ar | Consumidor tenta de novo com backoff até 5 s e volta sozinho |
-| F8 | Várias réplicas | Fila SQS divide as mensagens; idempotência evita efeito duplicado |
+| F8 | Várias réplicas | 2 réplicas por padrão (portas 8083-8084); a fila SQS divide as mensagens e a idempotência evita efeito duplicado. Acima de 2 réplicas, é preciso ampliar a faixa de portas no compose |
 
 ## Decisões de arquitetura
 
@@ -91,6 +93,9 @@ Cada fila tem DLQ com `maxReceiveCount = 5`, criada em `infra/init/init.sh`.
 ### D5. Laço de consumo resiliente e parada graciosa
 
 - Erros do broker nunca encerram o laço: backoff exponencial de 250 ms até 5 s (R6/F6).
+- Os clientes AWS (`Program.cs`, função `Aws`) têm timeout de 15 s (maior que o long poll de 10 s) e não
+  repetem sozinhos (`MaxErrorRetry = 0`), igual aos serviços Go. Com o MiniStack pausado, a conexão presa
+  falha em 15 s e o laço registra `broker unreachable, retrying` em vez de ficar parado em silêncio.
 - A URL da fila e a chave AES são obtidas sob demanda e só guardadas depois de obtidas com sucesso.
   O serviço sobe mesmo com o MiniStack ainda fora do ar.
 - Ao parar, o long poll em andamento (10 s) termina e o lote recebido é processado antes de sair.
@@ -99,23 +104,43 @@ Cada fila tem DLQ com `maxReceiveCount = 5`, criada em `infra/init/init.sh`.
 ### D6. Trilha append-only e estado derivado
 
 Cada chamada é um item `call#{callId}` com a lista `events`, onde só se acrescenta (`list_append`).
-Cada evento guarda o payload original e o **SHA-256 da mensagem recebida**, para provar depois que ele
-não foi alterado. O estado (`PENDING`, `ACTIVE`, `ENDED`, `FAILED`, participantes, duração) **não é
-gravado**: é recalculado a cada leitura em `CallTrail.Build`, ordenando por `occurredAt`. Assim o
-resultado não depende da ordem em que as mensagens chegaram.
+Cada evento guarda o payload, a **mensagem original inteira** (`envelope`) e o **SHA-256 dessa mensagem**.
+Na leitura, `AuditEvent.Verified` recalcula o SHA-256 do `envelope` guardado e compara com o hash guardado.
+A API mostra o resultado em cada evento como `verified`. Eventos gravados antes de o envelope ser guardado
+aparecem com `verified: false`.
+
+O estado (`PENDING`, `ACTIVE`, `ENDED`, `FAILED`, participantes, duração) **não é gravado**: é recalculado
+a cada leitura em `CallTrail.Build`, ordenando por `occurredAt`. Assim o resultado não depende da ordem em
+que as mensagens chegaram. Há duas listas de pessoas:
+
+- `participants`: todo mundo que já participou da chamada (nunca diminui).
+- `present`: quem está na chamada agora. Entrar adiciona; `ParticipantLeft` e `ParticipantTimedOut`
+  removem; `CallEnded` e `CallFailed` esvaziam.
+
+`ParticipantTimedOut` só circula na fila `relay-results` (media-relay → call-signaling), então o vault não o
+recebe. Uma queda por timeout chega à trilha como o `ParticipantLeft` que o call-signaling publica ao tirar
+o participante.
 
 ### D7. Gravação fora do caminho do áudio (media-relay)
 
 O `Recorder` (Go, `internal/app/recorder.go`) recebe uma cópia de cada pacote Opus que o navegador envia:
 
-- `Record` só acrescenta o pacote na memória. Ele **nunca bloqueia** a chamada.
+- `Record` só acrescenta o pacote na memória e, quando o trecho fecha, entrega os frames crus a um canal.
+  Ele **não monta envelope nem serializa JSON** e **nunca bloqueia** a chamada. `Flush` e `flushIdle`
+  seguem a mesma regra.
 - O trecho é fechado a cada `AUDIO_CHUNK_MS` (5 s), ao atingir 96 KiB (abaixo do limite de 256 KiB do SQS
   depois do base64), quando o participante sai ou quando a conexão dele é trocada (nova linha do tempo RTP).
-  Um verificador por segundo fecha os trechos de quem parou de mandar pacotes.
-- Os trechos prontos vão para um canal com capacidade 512. Se encher (broker lento), o trecho é
-  **descartado e contado** (`Dropped`). A gravação perde dados antes de atrasar a voz.
-- A publicação tenta até 6 vezes com backoff. No desligamento, os trechos pendentes são enviados com
-  5 s de prazo.
+- Uma goroutine própria, a cada segundo, fecha os trechos de quem parou de mandar pacotes. Ela não depende
+  do envio: um envio preso em novas tentativas não atrasa esse corte.
+- O canal tem capacidade 512. Se encher (broker lento), o trecho é **descartado e contado** (`Dropped`).
+  A gravação perde dados antes de atrasar a voz.
+- A goroutine de envio (`Run`) monta o envelope e o JSON (`encode`) e publica com até 6 tentativas e
+  backoff (250 ms dobrando até 5 s). Um trecho que falha nas 6 tentativas com o serviço rodando é
+  **registrado no log** (`audio chunk not published`) e **não entra** em `Dropped`.
+- No desligamento, `drain` reenvia os trechos pendentes com backoff até um prazo único de 5 s
+  (`DrainTimeout`). O que sobrar depois do prazo é contado em `Dropped`. Depois que o desligamento começa, pacotes
+  novos não são guardados, e um trecho cortado depois que `Run` terminou também é contado em `Dropped`: nada se
+  perde sem ser contado.
 - Desligado se `AUDIO_CHUNKS_QUEUE` não estiver definida.
 
 Os pacotes Opus são gravados **como chegaram, sem decodificar**. É barato e não perde qualidade.
@@ -148,12 +173,29 @@ CRC-32 e granule position calculada a partir do byte TOC de cada pacote (RFC 671
 é feita em tempo constante sobre o SHA-256 dos dois valores. Os IDs que viram parte da chave S3 aceitam
 só `[A-Za-z0-9_-]{1,64}` (sem `/` nem `..`).
 
+`AUDIT_API_TOKEN` é **obrigatória**: sem ela o processo escreve
+`audit-vault: missing environment variables: AUDIT_API_TOKEN` e sai com código 1 (`Program.cs` trata o erro de
+`VaultConfig.Load`; uma exceção não tratada deixava o processo girando como PID 1 no contêiner, sem sair). Não existe modo com a API aberta. O compose define `larpspeak-audit-demo` como padrão para a demo.
+
+Rotas: `GET /audit/calls?limit=` (1 a 200, padrão 50), `GET /audit/calls/{callId}` (eventos com `sha256` e
+`verified`, mais `participants` e `present`) e, com a gravação ligada, `GET /audit/calls/{callId}/audio` e
+`GET /audit/calls/{callId}/audio/{userId}` (arquivo `.opus`).
+
 ### D11. Um processo, dois consumidores
 
 O audit-vault roda um `QueueConsumer` por fila (`audit-vault-call-events` e, com gravação ligada,
 `audio-chunks`), cada um com seu `IMessageHandler` (`MessageProcessor` e `AudioProcessor`). Eles são
 registrados por `ConsumerRegistration.AddQueueConsumer<THandler>`, que usa
 `AddSingleton<IHostedService>` **de propósito**. Veja "Correção: consumidor de áudio que nunca rodava".
+
+O compose sobe 2 réplicas por padrão (`deploy.replicas: ${AUDIT_VAULT_REPLICAS:-2}`, portas `8083-8084:8080`).
+As duas consomem as duas filas como consumidores concorrentes.
+
+### D12. Contrato `AudioChunk` igual ao código
+
+`contracts/events/AudioChunk.v1.schema.json` descreve os mesmos limites que `AudioChunk.TryParse` aplica:
+IDs `[A-Za-z0-9_-]{1,64}` (incluindo `messageId`), `callId` igual ao `correlationId`, `startMs` e
+`durationMs` obrigatórios e ≥ 0, 1 a 5000 frames, cada frame com `ts` uint32 e `data` em base64 de 1 a 2000 bytes.
 
 ## Classes principais
 
@@ -164,7 +206,8 @@ registrados por `ConsumerRegistration.AddQueueConsumer<THandler>`, que usa
 | `ConsumerRegistration` | `QueueConsumer.cs` | Registra um consumidor por fila |
 | `MessageProcessor` | `MessageProcessor.cs` | Evento de chamada → trilha |
 | `DynamoAuditStore` | `DynamoAuditStore.cs` | Transação marcador + trilha |
-| `CallTrail` / `AuditEvent` | `AuditModels.cs` | Estado derivado e evento imutável com SHA-256 |
+| `CallTrail` / `AuditEvent` | `AuditModels.cs` | Estado derivado (`participants`, `present`) e evento imutável com envelope, SHA-256 e `Verified` |
+| `VaultConfig` | `VaultConfig.cs` | Lê as variáveis de ambiente; falha na partida se faltar alguma obrigatória |
 | `AudioChunk` / `ChunkCodec` / `AudioKeys` | `AudioChunks.cs` | Valida o trecho, formato binário, chaves S3 |
 | `AudioCrypto` | `AudioCrypto.cs` | AES-256-GCM com AAD |
 | `AudioProcessor` / `AudioExporter` | `AudioProcessor.cs` | Grava o trecho; monta o `.opus` |
@@ -180,7 +223,8 @@ registrados por `ConsumerRegistration.AddQueueConsumer<THandler>`, que usa
 | `CALL_EVENTS_QUEUE`, `AUDIT_TABLE`, `PROCESSED_TABLE` | audit-vault | obrigatórias | Trilha de auditoria |
 | `AUDIO_CHUNKS_QUEUE` | ambos | vazio = gravação desligada | Liga a gravação |
 | `AUDIO_BUCKET`, `AUDIO_KEY_SECRET` | audit-vault | obrigatórias com gravação | Destino e chave |
-| `AUDIT_API_TOKEN` | audit-vault | `larpspeak-audit-demo` no compose | Token de `/audit/*` |
+| `AUDIT_API_TOKEN` | audit-vault | obrigatória (`larpspeak-audit-demo` no compose) | Token de `/audit/*`; sem ela o serviço não sobe |
+| `AUDIT_VAULT_REPLICAS` | compose | 2 | Réplicas do audit-vault (portas 8083-8084) |
 | `AUDIO_CHUNK_MS` | media-relay | 5000 (mínimo 1000) | Duração de cada trecho |
 
 ## Correção: consumidor de áudio que nunca rodava
@@ -207,8 +251,30 @@ um `OggS` válido, e o mesmo trecho copiado para outro usuário devolveu `record
 - Só o áudio do navegador (WebRTC) é gravado. O cliente UDP de terminal (`voice-client`) não é.
 - Silêncios entre trechos (queda e retorno) não são preenchidos: o `.opus` toca os trechos emendados.
 - A gravação é melhor esforço: com o broker fora por muito tempo, trechos podem ser descartados (e contados).
-- Sem `AUDIT_API_TOKEN`, `/audit/*` fica aberto, inclusive o áudio decifrado.
-- `AUDIO_CHUNK_MS` não tem limite superior. Com pacotes de 20 ms, trechos acima de ~100 s passam do limite
-  de 5000 frames do vault e vão para a DLQ.
+  Um trecho que falha nas 6 tentativas com o serviço rodando só aparece no log, não em `Dropped`.
+- `AUDIO_CHUNK_MS` não tem limite superior. Na prática o corte de 96 KiB costuma vir antes (cerca de 25 s
+  a ~32 kbit/s). O limite de 5000 frames do vault só manda um trecho para a DLQ se os frames tiverem, em
+  média, menos de ~20 bytes (96 KiB / 5000).
+- `verified` prova que o envelope guardado bate com o hash guardado. Quem tem escrita em `audit-records`
+  pode alterar os dois juntos.
+- Com mais de 2 réplicas do audit-vault, a faixa de portas `8083-8084` do compose precisa ser ampliada.
 - A chave AES é única e sem rotação; trocá-la torna as gravações antigas ilegíveis.
 - No MiniStack tudo fica em memória: derrubar o ambiente apaga trilhas, gravações e a chave.
+
+## Decisões do áudio e da trilha
+
+Decididas em 2026-11-25 e aprovadas pelo responsável em 2026-11-26.
+
+1. **Exceção de idempotência no áudio.** A regra geral é efeito + marcador em uma única
+   `TransactWriteItems`. O S3 não participa dessa transação, então o áudio usa consulta → PUT → marcador,
+   com chave S3 determinística (inclui o `messageId`). Reentrega sobrescreve o mesmo objeto.
+   Alternativa: guardar o áudio no DynamoDB (limite de 400 KB por item) ou um outbox de chaves S3.
+2. **Gravação é melhor esforço.** Trechos são descartados (e contados em `Dropped`) quando o canal de 512
+   enche ou o prazo de 5 s do desligamento acaba. Motivo: gravar nunca pode atrasar a voz.
+   Alternativa: fila local em disco ou bloquear o envio (prejudicaria a chamada).
+3. **Token de `/audit/*` obrigatório (fail closed).** Sem `AUDIT_API_TOKEN` o serviço não sobe, porque a
+   API entrega áudio decifrado. Alternativa: token opcional (API aberta sem ele) ou JWT do call-signaling
+   (acopla os serviços).
+4. **`participants` x `present`.** `participants` guarda todos que já participaram; `present` mostra quem
+   está na chamada agora. Motivo: a auditoria precisa do histórico e do estado atual.
+   Alternativa: uma só lista (perde um dos dois).
