@@ -19,7 +19,7 @@ TOKEN = curl -s -o /dev/null -XPOST $(SERVER)/auth/register -d '{"username":"$(M
 CLIENT_FLAGS = -server $(SERVER) -user $(ME) $(if $(MUTE),-mute) $(if $(DEAFEN),-deafen) \
 	$(if $(NOMIC),-nomic) $(if $(LOSS),-loss $(LOSS)) $(if $(RELAY),-relay $(RELAY))
 
-.PHONY: help build start stop clean certs logs ps call join listen invite leave status mute deafen test
+.PHONY: help build start stop clean certs logs ps call join listen invite leave status mute deafen test test_audit recording kill_relay
 
 help: ## lista os comandos
 	@grep -E '^[a-z_%0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  make %-14s %s\n", $$1, $$2}'
@@ -92,6 +92,14 @@ status: _need_me ## estado de uma chamada: ME=ana CALL=<callId>
 _need_me:
 	@test -n "$(ME)" || { echo "informe ME=<seu usuário>"; exit 1; }
 
+# --- demo da apresentação (chamada real pelo navegador; roteiro em presentation/DEMO-LAN.md) ---
+
+recording: ## prova que a gravação está cifrada no S3 e abre o áudio de cada participante: [CALL=<callId>]
+	@scripts/demo/call-recording.sh $(CALL)
+
+kill_relay: ## derruba o pod do relay que hospeda a chamada e mostra o failover: [CALL=<callId>]
+	@scripts/demo/kill-call-relay.sh $(CALL)
+
 # --- testes ---
 
 test: ## testes unitários Go (os 3 módulos)
@@ -101,6 +109,12 @@ test: ## testes unitários Go (os 3 módulos)
 	@if command -v dotnet >/dev/null && dotnet --list-sdks | grep -q '^10\.'; then cd services && dotnet test audit-vault.Tests; \
 	else docker run --rm -v "$$PWD/services:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test audit-vault.Tests; fi
 
-test_case%: ## cenário de falha da especificação: make test_case1 ... make test_case8
+test_case%: ## cenário de falha da especificação (todos os serviços): make test_case1 ... make test_case8
 	@test -x scripts/demo/f$*.sh || { echo "cenários: test_case1 a test_case8"; exit 1; }
 	@scripts/demo/f$*.sh
+	@if [ -x scripts/demo/audit-f$*.sh ]; then scripts/demo/audit-f$*.sh; fi
+
+test_audit: ## audit-vault ponta a ponta com chamadas WebRTC reais (gravação, trilha, F2 F3 F4 F6 F8)
+	@mkdir -p bin && cd tools/webrtc-probe && go build -o ../../bin/webrtc-probe .
+	@failed=; for s in recording trail f2 f3 f4 f6 f8; do scripts/demo/audit-$$s.sh || failed="$$failed $$s"; done; \
+	if [ -n "$$failed" ]; then echo "FAIL:$$failed"; exit 1; else echo "PASS: todos os cenários do audit-vault"; fi
