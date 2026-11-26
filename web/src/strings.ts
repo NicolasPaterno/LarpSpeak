@@ -8,16 +8,16 @@ export const t = {
   auth: {
     login: 'Entrar',
     register: 'Criar conta',
-    username: 'Indicativo',
+    username: 'Usuário',
     usernameHint: '3–32 caracteres: a–z, 0–9, _ ou -',
     password: 'Senha',
     passwordHint: 'mínimo de 8 caracteres',
     submitLogin: 'Entrar na frequência',
-    submitRegister: 'Registrar indicativo',
+    submitRegister: 'Criar conta',
     busy: 'Transmitindo…',
-    invalid: 'Indicativo ou senha incorretos.',
-    taken: 'Esse indicativo já está em uso.',
-    rules: 'Indicativo: 3–32 caracteres a–z 0–9 _ -. Senha: 8–128 caracteres.',
+    invalid: 'Usuário ou senha incorretos.',
+    taken: 'Esse nome de usuário já está em uso.',
+    rules: 'Usuário: 3–32 caracteres a–z 0–9 _ -. Senha: 8–128 caracteres.',
     offline: 'Sem sinal com o servidor. Tente de novo em instantes.',
   },
 
@@ -26,7 +26,7 @@ export const t = {
     openLead: 'Crie uma frequência e chame sua equipe.',
     seats: 'Vagas',
     invite: 'Convidar',
-    invitePlaceholder: 'indicativo + Enter',
+    invitePlaceholder: 'nome de usuário + Enter',
     open: 'Abrir canal',
     tuneTitle: 'Sintonizar',
     tuneLead: 'Cole o código ou o link de um canal.',
@@ -118,6 +118,6 @@ export const t = {
   session: {
     loading: 'Sincronizando…',
     logout: 'Sair',
-    signedAs: 'Operador',
+    signedAs: 'Conectado como',
   },
 }
