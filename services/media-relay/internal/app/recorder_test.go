@@ -38,7 +38,7 @@ type clock struct {
 	t  time.Time
 }
 
-func (c *clock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *clock) now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *clock) add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
 
 func newTestRecorder(sink ChunkSink) (*Recorder, *clock) {
@@ -210,4 +210,121 @@ func TestNilRecorderIsOff(t *testing.T) {
 	r.Record("c", "ana", 1, []byte{1})
 	r.Flush("c", "ana")
 	r.Run(context.Background())
+}
+
+func TestRecordOnlyHandsTheChunkOver(t *testing.T) {
+	sink := &fakeSink{bodies: make(chan string, 8)}
+	r, _ := newTestRecorder(sink) // Run is NOT started
+	r.MaxBytes = 1
+	r.Record("c", "ana", 1, []byte{1, 2}) // cut on the audio path
+	if sink.calls != 0 {
+		t.Fatalf("Record published inline: %d sends", sink.calls)
+	}
+	select {
+	case c := <-r.out: // raw frames, not an encoded body
+		if c.key.user != "ana" || len(c.t.frames) != 1 {
+			t.Fatalf("bad hand-over: %+v", c)
+		}
+	default:
+		t.Fatal("chunk not handed to the sender")
+	}
+}
+
+// blockingSink holds the first Send until release is closed.
+type blockingSink struct {
+	fakeSink
+	once    sync.Once
+	release chan struct{}
+}
+
+func (b *blockingSink) Send(ctx context.Context, queue, body string) error {
+	first := false
+	b.once.Do(func() { first = true })
+	if first {
+		<-b.release
+	}
+	return b.fakeSink.Send(ctx, queue, body)
+}
+
+func TestIdleTracksAreCutWhileASendIsStuck(t *testing.T) {
+	sink := &blockingSink{fakeSink: fakeSink{bodies: make(chan string, 8)}, release: make(chan struct{})}
+	r, c := newTestRecorder(sink)
+	go r.Run(t.Context())
+	r.Record("c", "ana", 1, []byte{1})
+	r.Flush("c", "ana") // the sender now blocks on this chunk
+	r.Record("c", "bob", 1, []byte{2})
+	c.add(5 * time.Second) // bob is idle
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r.mu.Lock()
+		n := len(r.tracks)
+		r.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(sink.release)
+			t.Fatal("idle track not cut while a send was blocked")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(sink.release)
+	got := map[string]bool{}
+	for range 2 {
+		_, _, ch := recv(t, &sink.fakeSink)
+		got[ch.UserID] = true
+	}
+	if !got["ana"] || !got["bob"] {
+		t.Fatalf("published %v", got)
+	}
+}
+
+func TestShutdownFlushRetriesUntilTheDeadline(t *testing.T) {
+	sink := &fakeSink{bodies: make(chan string, 8), failN: 4}
+	r, _ := newTestRecorder(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // shutdown right away: everything goes through the drain
+	r.Record("c", "ana", 1, []byte{1})
+	r.Run(ctx)
+	recv(t, sink)
+	if sink.calls != 5 || r.Dropped() != 0 {
+		t.Fatalf("sends = %d dropped = %d, want 5 and 0", sink.calls, r.Dropped())
+	}
+}
+
+func TestShutdownFlushCountsWhatIsLeftAsDropped(t *testing.T) {
+	sink := &fakeSink{bodies: make(chan string, 8), failN: 1 << 30} // broker never comes back
+	r, _ := newTestRecorder(sink)
+	r.DrainTimeout = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.Record("c", "ana", 1, []byte{1})
+	r.Record("c", "bob", 1, []byte{2})
+	start := time.Now()
+	r.Run(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("drain overran its deadline: %v", d)
+	}
+	if sink.calls < 2 || r.Dropped() != 2 {
+		t.Fatalf("sends = %d dropped = %d, want retries and 2 dropped", sink.calls, r.Dropped())
+	}
+}
+
+func TestAudioAfterShutdownIsNotBufferedAndLateChunksAreCounted(t *testing.T) {
+	sink := &fakeSink{bodies: make(chan string, 8)}
+	r, _ := newTestRecorder(sink)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.Run(ctx) // stopped: nobody reads the queue anymore
+	r.Record("c", "ana", 1, []byte{1})
+	r.mu.Lock()
+	n := len(r.tracks)
+	r.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("audio buffered after shutdown: %d tracks", n)
+	}
+	r.enqueue(trackKey{"c", "bob"}, &track{frames: []audioFrame{{TS: 1, Data: []byte{2}}}}) // a cut racing the stop
+	if r.Dropped() != 1 || len(r.out) != 0 {
+		t.Fatalf("dropped = %d queued = %d, want 1 and 0", r.Dropped(), len(r.out))
+	}
 }

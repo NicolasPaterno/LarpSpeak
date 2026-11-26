@@ -28,7 +28,7 @@ public sealed partial record AudioChunk(string CallId, string UserId, long Start
         if (!IsSafeId(callId) || !IsSafeId(userId)) { error = "callId and userId must be 1-64 of A-Z a-z 0-9 _ -"; return false; }
         if (callId != env.CorrelationId) { error = "callId differs from correlationId"; return false; }
         if (!p.TryGetProperty("startMs", out var s) || !s.TryGetInt64(out var startMs) || startMs < 0) { error = "invalid startMs"; return false; }
-        long durationMs = p.TryGetProperty("durationMs", out var d) && d.TryGetInt64(out var dm) && dm >= 0 ? dm : 0;
+        if (!p.TryGetProperty("durationMs", out var d) || !d.TryGetInt64(out var durationMs) || durationMs < 0) { error = "invalid durationMs"; return false; }
         if (!p.TryGetProperty("frames", out var fs) || fs.ValueKind != JsonValueKind.Array) { error = "frames must be an array"; return false; }
         var n = fs.GetArrayLength();
         if (n is < 1 or > MaxFrames) { error = $"frames must have 1..{MaxFrames} items"; return false; }

@@ -24,6 +24,19 @@ type Store struct {
 	Cfg config.Config
 }
 
+// scan reads every page of a Scan (one call returns at most 1 MB).
+func (s *Store) scan(ctx context.Context, in *dynamodb.ScanInput) ([]map[string]types.AttributeValue, error) {
+	var items []map[string]types.AttributeValue
+	for p := dynamodb.NewScanPaginator(s.DB, in); p.HasMorePages(); {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, out.Items...)
+	}
+	return items, nil
+}
+
 func str(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
 func num(n int64) types.AttributeValue {
 	return &types.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
@@ -42,9 +55,9 @@ func (s *Store) Get(ctx context.Context, id string) (*domain.Call, error) {
 	return &c, attributevalue.UnmarshalMap(out.Item, &c)
 }
 
-// Pending lists calls still waiting for a relay. A scan is fine at demo scale.
+// Pending lists calls still waiting for a relay.
 func (s *Store) Pending(ctx context.Context) ([]domain.Call, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{
+	items, err := s.scan(ctx, &dynamodb.ScanInput{
 		TableName:                 &s.Cfg.CallsTable,
 		FilterExpression:          aws.String("#s = :p"),
 		ExpressionAttributeNames:  map[string]string{"#s": "status"},
@@ -54,12 +67,12 @@ func (s *Store) Pending(ctx context.Context) ([]domain.Call, error) {
 		return nil, err
 	}
 	var calls []domain.Call
-	return calls, attributevalue.UnmarshalListOfMaps(out.Items, &calls)
+	return calls, attributevalue.UnmarshalListOfMaps(items, &calls)
 }
 
-// ActiveInvites lists active calls that invited the user. A scan is fine at demo scale.
+// ActiveInvites lists active calls that invited the user.
 func (s *Store) ActiveInvites(ctx context.Context, user string) ([]domain.Call, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{
+	items, err := s.scan(ctx, &dynamodb.ScanInput{
 		TableName:                 &s.Cfg.CallsTable,
 		FilterExpression:          aws.String("#s = :a AND contains(invited, :u)"),
 		ExpressionAttributeNames:  map[string]string{"#s": "status"},
@@ -69,7 +82,7 @@ func (s *Store) ActiveInvites(ctx context.Context, user string) ([]domain.Call, 
 		return nil, err
 	}
 	var calls []domain.Call
-	return calls, attributevalue.UnmarshalListOfMaps(out.Items, &calls)
+	return calls, attributevalue.UnmarshalListOfMaps(items, &calls)
 }
 
 // CurrentCall returns the call the user is in according to signaling-users ("" if none).
@@ -236,12 +249,12 @@ func (s *Store) Ack(ctx context.Context, msgID string, out ...domain.Outgoing) e
 // --- outbox rows, read by the messaging relay ---
 
 func (s *Store) PendingOutbox(ctx context.Context) ([]messaging.Row, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.OutboxTable, ConsistentRead: aws.Bool(true)})
+	items, err := s.scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.OutboxTable, ConsistentRead: aws.Bool(true)})
 	if err != nil {
 		return nil, err
 	}
-	rows := make([]messaging.Row, len(out.Items))
-	for i, item := range out.Items {
+	rows := make([]messaging.Row, len(items))
+	for i, item := range items {
 		rows[i] = messaging.Row{ID: attr(item, "pk"), Dest: attr(item, "dest"), Body: attr(item, "body")}
 	}
 	return rows, nil

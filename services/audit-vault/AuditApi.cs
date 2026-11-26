@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace AuditVault;
 
-/// <summary>Read-only view of the audit trail. /health stays open; /audit/* needs the token when one is configured.</summary>
+/// <summary>Read-only view of the audit trail. /health stays open; /audit/* always needs the bearer token.</summary>
 public static class AuditApi
 {
     public static void Map(WebApplication app, VaultConfig cfg)
@@ -13,7 +13,7 @@ public static class AuditApi
 
         var audit = app.MapGroup("/audit").AddEndpointFilter(async (ctx, next) =>
         {
-            if (cfg.ApiToken is not null && !TokenOk(ctx.HttpContext.Request.Headers.Authorization.ToString(), cfg.ApiToken))
+            if (!TokenOk(ctx.HttpContext.Request.Headers.Authorization.ToString(), cfg.ApiToken))
                 return Results.Json(new { error = "unauthorized" }, statusCode: StatusCodes.Status401Unauthorized);
             return await next(ctx);
         });
@@ -68,11 +68,11 @@ public static class AuditApi
 
     private static object View(CallTrail t) => new
     {
-        t.CallId, t.Status, t.Participants, t.StartedAt, t.EndedAt, t.DurationMs, t.Reason,
+        t.CallId, t.Status, t.Participants, t.Present, t.StartedAt, t.EndedAt, t.DurationMs, t.Reason,
         EventCount = t.Events.Count,
         Events = t.Events.Select(e => new
         {
-            e.MessageId, e.Type, e.Version, e.OccurredAt, e.ReceivedAt, e.Sha256,
+            e.MessageId, e.Type, e.Version, e.OccurredAt, e.ReceivedAt, e.Sha256, e.Verified,
             Payload = JsonSerializer.Deserialize<JsonElement>(e.Payload),
         }),
     };

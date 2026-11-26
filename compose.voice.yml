@@ -10,7 +10,7 @@ services:
     environment:
       RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST to this machine's LAN IP}
 
-  media-relay-b:
+  media-relay-2:
     extends:
       file: docker-compose.yml
       service: media-relay

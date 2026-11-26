@@ -38,7 +38,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 type createCallRequest struct {
 	CalleeIDs       []string `json:"calleeIds"`       // invited users, notified when the call is live
-	MaxParticipants int      `json:"maxParticipants"` // seats in the call; default 2 for 1:1, MAX_PARTICIPANTS otherwise
+	MaxParticipants int      `json:"maxParticipants"` // seats in the call; default MAX_PARTICIPANTS (direct and group)
 }
 
 // handleCreate is the R3 async entry point: validate, run saga step 1, answer 202.

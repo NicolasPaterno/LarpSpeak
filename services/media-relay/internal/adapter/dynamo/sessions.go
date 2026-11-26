@@ -24,6 +24,19 @@ type Store struct {
 	Cfg config.Config
 }
 
+// scan reads every page of a Scan (one call returns at most 1 MB).
+func (s *Store) scan(ctx context.Context, in *dynamodb.ScanInput) ([]map[string]types.AttributeValue, error) {
+	var items []map[string]types.AttributeValue
+	for p := dynamodb.NewScanPaginator(s.DB, in); p.HasMorePages(); {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, out.Items...)
+	}
+	return items, nil
+}
+
 func str(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
 func num(n int64) types.AttributeValue {
 	return &types.AttributeValueMemberN{Value: strconv.FormatInt(n, 10)}
@@ -41,9 +54,9 @@ func (s *Store) Get(ctx context.Context, callID string) (*domain.Session, error)
 	return &ss, attributevalue.UnmarshalMap(out.Item, &ss)
 }
 
-// Allocated lists every allocated session. A scan is fine at demo scale.
+// Allocated lists every allocated session.
 func (s *Store) Allocated(ctx context.Context) ([]domain.Session, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{
+	items, err := s.scan(ctx, &dynamodb.ScanInput{
 		TableName:                 &s.Cfg.SessionsTable,
 		ConsistentRead:            aws.Bool(true),
 		FilterExpression:          aws.String("#s = :alloc"),
@@ -54,7 +67,7 @@ func (s *Store) Allocated(ctx context.Context) ([]domain.Session, error) {
 		return nil, err
 	}
 	var ss []domain.Session
-	return ss, attributevalue.UnmarshalListOfMaps(out.Items, &ss)
+	return ss, attributevalue.UnmarshalListOfMaps(items, &ss)
 }
 
 // Allocate: [dedupe, new session, RelayAllocated]. ErrReleased: a session already exists for the call.
@@ -112,12 +125,12 @@ func (s *Store) Emit(ctx context.Context, out domain.Outgoing) error {
 // --- outbox rows, read by the messaging relay ---
 
 func (s *Store) PendingOutbox(ctx context.Context) ([]messaging.Row, error) {
-	out, err := s.DB.Scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.OutboxTable, ConsistentRead: aws.Bool(true)})
+	items, err := s.scan(ctx, &dynamodb.ScanInput{TableName: &s.Cfg.OutboxTable, ConsistentRead: aws.Bool(true)})
 	if err != nil {
 		return nil, err
 	}
-	rows := make([]messaging.Row, len(out.Items))
-	for i, item := range out.Items {
+	rows := make([]messaging.Row, len(items))
+	for i, item := range items {
 		rows[i] = messaging.Row{ID: attr(item, "pk"), Dest: attr(item, "dest"), Body: attr(item, "body")}
 	}
 	return rows, nil

@@ -95,7 +95,9 @@ services:
   audit-vault:
     <<: *after-init
     build: ./services/audit-vault
-    ports: ["8083:8080"]
+    deploy:
+      replicas: ${AUDIT_VAULT_REPLICAS:-2} # competing consumers on both queues (R4, F8)
+    ports: ["8083-8084:8080"] # one host port per replica; widen the range when scaling above 2
     environment:
       <<: *aws
       SERVICE_NAME: audit-vault

@@ -29,8 +29,8 @@ public interface IAudioKeyProvider
 public interface IProcessedStore
 {
     Task<bool> SeenAsync(string messageId, CancellationToken ct);
-    /// <summary>Marks it handled; marking twice is not an error (two replicas may race).</summary>
-    Task MarkAsync(string messageId, CancellationToken ct);
+    /// <summary>Marks it handled. False: another replica marked it first (two replicas may race).</summary>
+    Task<bool> MarkAsync(string messageId, CancellationToken ct);
 }
 
 public sealed class S3AudioStore(IAmazonS3 s3, VaultConfig cfg) : IAudioStore
@@ -100,7 +100,7 @@ public sealed class DynamoProcessedStore(IAmazonDynamoDB db, VaultConfig cfg) : 
         return res.IsItemSet;
     }
 
-    public async Task MarkAsync(string messageId, CancellationToken ct)
+    public async Task<bool> MarkAsync(string messageId, CancellationToken ct)
     {
         try
         {
@@ -114,7 +114,8 @@ public sealed class DynamoProcessedStore(IAmazonDynamoDB db, VaultConfig cfg) : 
                 },
                 ConditionExpression = "attribute_not_exists(pk)",
             }, ct);
+            return true;
         }
-        catch (ConditionalCheckFailedException) { /* another replica marked it first */ }
+        catch (ConditionalCheckFailedException) { return false; }
     }
 }

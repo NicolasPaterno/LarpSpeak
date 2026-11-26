@@ -38,7 +38,12 @@ public sealed class AudioProcessor(
             var sealedChunk = AudioCrypto.Seal(key, ChunkCodec.Serialize(chunk.Frames), AudioCrypto.Aad(chunk.CallId, chunk.UserId, chunk.StartMs));
             var objectKey = AudioKeys.For(chunk.CallId, chunk.UserId, chunk.StartMs, env.MessageId);
             await audio.PutAsync(objectKey, sealedChunk, ct);
-            await processed.MarkAsync(env.MessageId, ct);
+            if (!await processed.MarkAsync(env.MessageId, ct))
+            {
+                // Lost the race to another replica: same key, so S3 still holds one object for this message.
+                log.LogInformation("duplicate ignored messageId={MessageId} correlationId={CorrelationId} type={Type}", env.MessageId, env.CorrelationId, env.Type);
+                return Outcome.Duplicate;
+            }
             log.LogInformation("audio stored messageId={MessageId} correlationId={CorrelationId} userId={UserId} frames={Frames} bytes={Bytes}",
                 env.MessageId, env.CorrelationId, chunk.UserId, chunk.Frames.Count, sealedChunk.Length);
             return Outcome.Recorded;

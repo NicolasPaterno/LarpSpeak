@@ -2,7 +2,8 @@
 // the call, per-user playback and level meters. No React in here.
 //
 // Offer recipe (agreed with media-relay): 1 sendrecv audio m-line (mic) +
-// N-1 recvonly ones ("slots"), plus DataChannel "meta" where the relay says
+// N-2 recvonly ones, N = max(capacity, 10): N-1 audio m-lines, each one a slot
+// for another participant's voice, plus DataChannel "meta" where the relay says
 // which slot (mid) carries which user. N >= 10 so a direct call that turns into
 // a group never needs renegotiation.
 import { api, ApiError } from './api.ts'

@@ -41,8 +41,9 @@ public sealed class FakeKeys(byte[]? key = null) : IAudioKeyProvider
 public sealed class FakeProcessed : IProcessedStore
 {
     public HashSet<string> Ids { get; } = new();
-    public Task<bool> SeenAsync(string id, CancellationToken ct) => Task.FromResult(Ids.Contains(id));
-    public Task MarkAsync(string id, CancellationToken ct) { Ids.Add(id); return Task.CompletedTask; }
+    public bool Blind { get; set; } // SeenAsync misses: two replicas checked before either marked
+    public Task<bool> SeenAsync(string id, CancellationToken ct) => Task.FromResult(!Blind && Ids.Contains(id));
+    public Task<bool> MarkAsync(string id, CancellationToken ct) => Task.FromResult(Ids.Add(id));
 }
 
 public static class A
@@ -328,6 +329,7 @@ public class AudioChunkParsingTests
     [InlineData("""{"callId":"c1","userId":"ana","startMs":1,"durationMs":1,"frames":[{"ts":0,"data":"not base64!"}]}""")]
     [InlineData("""{"callId":"c1","userId":"ana","startMs":1,"durationMs":1,"frames":[{"ts":0,"data":""}]}""")]
     [InlineData("""{"callId":"c1","userId":"ana","startMs":-5,"durationMs":1,"frames":[{"ts":0,"data":"+A=="}]}""")]
+    [InlineData("""{"callId":"c1","userId":"ana","startMs":1,"frames":[{"ts":0,"data":"+A=="}]}""")]
     [InlineData("""{"callId":"c1","userId":"ana","startMs":1,"durationMs":1,"frames":[{"data":"+A=="}]}""")]
     [InlineData("""{"callId":"c1","userId":"ana","durationMs":1,"frames":[{"ts":0,"data":"+A=="}]}""")]
     public void Rejects_malformed_payloads(string payload) =>
@@ -370,6 +372,17 @@ public class AudioProcessorTests
         Assert.Equal(Outcome.Recorded, outcomes[0]);
         Assert.All(outcomes.Skip(1), o => Assert.Equal(Outcome.Duplicate, o));
         Assert.Equal(1, s.Puts);
+    }
+
+    [Fact] // F3 race: both replicas pass SeenAsync; the one that loses MarkAsync reports a duplicate
+    public async Task Losing_the_mark_race_is_a_duplicate()
+    {
+        var (p, s, _, d) = A.Processor();
+        d.Blind = true;
+        var body = A.Chunk("race", "c1", "ana", 1_700_000_000_000, A.Opus(1));
+        Assert.Equal(Outcome.Recorded, await p.HandleAsync(body, default));
+        Assert.Equal(Outcome.Duplicate, await p.HandleAsync(body, default));
+        Assert.Single(s.Objects); // same deterministic key: overwritten, still one object
     }
 
     [Theory] // F4: left for the DLQ, nothing stored
@@ -495,7 +508,7 @@ public class AudioConfigTests
     public void Recording_is_off_without_the_queue_and_needs_bucket_and_secret_with_it()
     {
         Func<string, string?> basic(params (string, string)[] extra) => k =>
-            new Dictionary<string, string> { ["CALL_EVENTS_QUEUE"] = "q", ["AUDIT_TABLE"] = "a", ["PROCESSED_TABLE"] = "p" }
+            new Dictionary<string, string> { ["CALL_EVENTS_QUEUE"] = "q", ["AUDIT_TABLE"] = "a", ["PROCESSED_TABLE"] = "p", ["AUDIT_API_TOKEN"] = "t" }
                 .Concat(extra.Select(e => KeyValuePair.Create(e.Item1, e.Item2))).ToDictionary().GetValueOrDefault(k);
 
         Assert.False(VaultConfig.Load(basic()).AudioEnabled);
